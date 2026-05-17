@@ -1,0 +1,3256 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>FiguBarrio</title>
+  <!-- vConsole: consola de debug para celular -->
+  <script src="https://cdn.bootcdn.net/ajax/libs/vConsole/3.15.1/vconsole.min.js"></script>
+  <script>var vConsole = new window.VConsole();</script>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getFirestore, doc, setDoc, getDoc, collection, getDocs, runTransaction, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyBV5zvxqaDuJH1v-ySDrLyI5puwEIf8qec",
+      authDomain: "figubarrio.firebaseapp.com",
+      projectId: "figubarrio",
+      storageBucket: "figubarrio.firebasestorage.app",
+      messagingSenderId: "430547469989",
+      appId: "1:430547469989:web:bb1a9edc0bd714bac0af4c"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // Exponer Firebase globalmente para que Babel pueda usarlo
+    window.fbDB = db;
+    window.fbSetDoc = setDoc;
+    window.fbGetDoc = getDoc;
+    window.fbDoc = doc;
+    window.fbCollection = collection;
+    window.fbGetDocs = getDocs;
+    window.fbRunTransaction = (db, fn) => runTransaction(db, fn);
+    window.fbTimestamp = serverTimestamp;
+    window.firebaseReady = true;
+
+
+    console.log("Firebase conectado ✅");
+  </script>
+  <script type="text/babel" data-type="module">
+const { useState, useMemo, useEffect, useContext, createContext } = React;
+
+// ╔══════════════════════════════════════════════════════════════╗
+//  FIGUBARRIO — PROTOTIPO FUNCIONAL CON MATCHING REAL
+//  ─────────────────────────────────────────────────────────────
+//  CÓMO PROBAR EL MATCHING CON OTRO "USUARIO":
+//
+//  1. Abrí esta app en UNA pestaña → registrate como Usuario A
+//     → cargá tus figuritas repetidas (ej: #10, #23, #47)
+//
+//  2. Abrí OTRA pestaña del mismo navegador → registrate como
+//     Usuario B → cargá las figuritas que TE FALTAN (ej: #10)
+//     → también cargá tus repetidas (ej: #88, #102)
+//
+//  3. En la pestaña A, andá a Matches → vas a ver que
+//     el sistema detectó que podés cambiar con Usuario B
+//     porque vos tenés lo que le falta y viceversa.
+//
+//  4. Hacé lo mismo al revés en la pestaña B.
+//
+//  El motor cruza automáticamente: mis_repetidas ∩ sus_faltan
+//  y sus_repetidas ∩ mis_faltan → match perfecto bilateral.
+// ╚══════════════════════════════════════════════════════════════╝
+
+// ─── STORAGE ENGINE — FIREBASE + localStorage fallback ────────────────────────
+// Firebase para datos compartidos entre dispositivos
+// localStorage como cache local y fallback
+const DB = {
+  // Guardar datos de un usuario en Firebase Y localStorage
+  saveUser: async (userId, data) => {
+    try {
+      // Guardar en localStorage (inmediato)
+      localStorage.setItem("fb_user_" + userId, JSON.stringify(data));
+      // Guardar en Firebase (compartido entre dispositivos)
+      if(window.fbDB) {
+        await window.fbSetDoc(window.fbDoc(window.fbDB, "usuarios", userId), data);
+      }
+    } catch(e) { console.error("saveUser error:", e); }
+  },
+  // Leer datos de un usuario
+  getUser: (userId) => {
+    try { const d = localStorage.getItem("fb_user_" + userId); return d ? JSON.parse(d) : null; } catch(e) { return null; }
+  },
+  // Guardar figuritas en Firebase Y localStorage
+  saveFigus: async (userId, albumId, figus) => {
+    try {
+      localStorage.setItem("fb_figus_" + userId + "_" + albumId, JSON.stringify(figus));
+      if(window.fbDB) {
+        // Limpiar figus — solo guardar strings válidos ("tengo" o "repetida")
+        const figusSafe = {};
+        Object.entries(figus).forEach(([k, v]) => {
+          if(typeof v === "string" && (v === "tengo" || v === "repetida")) {
+            figusSafe[k] = v;
+          }
+        });
+        await window.fbSetDoc(
+          window.fbDoc(window.fbDB, "figuritas", userId + "_" + albumId),
+          { userId, albumId, figus: figusSafe, updatedAt: Date.now() }
+        );
+      }
+    } catch(e) { console.error("saveFigus error:", e); }
+  },
+  // Leer figuritas — primero Firebase, luego localStorage
+  getFigus: (userId, albumId) => {
+    try { const d = localStorage.getItem("fb_figus_" + userId + "_" + albumId); return d ? JSON.parse(d) : {}; } catch(e) { return {}; }
+  },
+  // Leer figuritas de Firebase (async, para matching)
+  getFigusFB: async (userId, albumId) => {
+    try {
+      if(window.fbDB) {
+        const snap = await window.fbGetDoc(window.fbDoc(window.fbDB, "figuritas", userId + "_" + albumId));
+        if(snap.exists()) return snap.data().figus || {};
+      }
+      const d = localStorage.getItem("fb_figus_" + userId + "_" + albumId);
+      return d ? JSON.parse(d) : {};
+    } catch(e) { return {}; }
+  },
+  // Listar todos los usuarios desde Firebase
+  getAllUsers: () => {
+    try {
+      const users = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("fb_user_")) {
+          const d = localStorage.getItem(key);
+          if (d) users.push(JSON.parse(d));
+        }
+      }
+      return users;
+    } catch(e) { return []; }
+  },
+  // Cargar usuarios desde Firebase y guardar en localStorage
+  syncUsuarios: async () => {
+    try {
+      if(!window.fbDB) return;
+      const snap = await window.fbGetDocs(window.fbCollection(window.fbDB, "usuarios"));
+      snap.forEach(d => {
+        const data = d.data();
+        localStorage.setItem("fb_user_" + data.userId, JSON.stringify(data));
+      });
+      console.log("Usuarios sincronizados desde Firebase:", snap.size);
+    } catch(e) { console.error("syncUsuarios error:", e); }
+  },
+  // Cargar figuritas de todos desde Firebase
+  syncFiguritas: async () => {
+    try {
+      if(!window.fbDB) return;
+      const snap = await window.fbGetDocs(window.fbCollection(window.fbDB, "figuritas"));
+      snap.forEach(d => {
+        const data = d.data();
+        localStorage.setItem("fb_figus_" + data.userId + "_" + data.albumId, JSON.stringify(data.figus));
+      });
+      console.log("Figuritas sincronizadas desde Firebase:", snap.size);
+    } catch(e) { console.error("syncFiguritas error:", e); }
+  },
+  clearAll: () => {
+    try {
+      const keys = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("fb_")) keys.push(k);
+      }
+      keys.forEach(k => localStorage.removeItem(k));
+    } catch(e) {}
+  },
+};
+
+
+// ═══════════════════════════════════════════════════════════
+//  SISTEMA SEMANAL — Procesamiento los LUNES
+//  Cada sobre tiene código único por par de usuarios
+// ═══════════════════════════════════════════════════════════
+
+// Obtener el lunes de la semana actual
+function getLunesActual() {
+  const hoy = new Date();
+  const dia = hoy.getDay(); // 0=dom, 1=lun...
+  const diff = dia === 0 ? -6 : 1 - dia;
+  const lunes = new Date(hoy);
+  lunes.setDate(hoy.getDate() + diff);
+  lunes.setHours(0,0,0,0);
+  return lunes;
+}
+
+// Semana actual como string clave (ej: "2026-W20")
+function getSemanaKey() {
+  const lunes = getLunesActual();
+  const year = lunes.getFullYear();
+  const start = new Date(year, 0, 1);
+  const week = Math.ceil(((lunes - start) / 86400000 + start.getDay() + 1) / 7);
+  return year + "-W" + String(week).padStart(2,"0");
+}
+
+// Generar código único de sobre
+function generarCodigoSobre() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "FB-";
+  for(let i=0;i<6;i++) code += chars[Math.floor(Math.random()*chars.length)];
+  return code;
+}
+
+// Días hasta el próximo lunes
+function diasHastaLunes() {
+  const hoy = new Date();
+  const dia = hoy.getDay();
+  if(dia === 1) return 0; // hoy es lunes
+  return dia === 0 ? 1 : 8 - dia;
+}
+
+// DB extendida para sobres
+const DBSobres = {
+  // Guardar sobre
+  save: (codigo, data) => {
+    try { localStorage.setItem("fb_sobre_" + codigo, JSON.stringify({...data, createdAt: Date.now()})); } catch(e) {}
+  },
+  // Leer sobre
+  get: (codigo) => {
+    try { const d = localStorage.getItem("fb_sobre_" + codigo); return d ? JSON.parse(d) : null; } catch(e) { return null; }
+  },
+  // Listar sobres de un usuario
+  getMios: (userId) => {
+    try {
+      const sobres = [];
+      for(let i=0;i<localStorage.length;i++) {
+        const k = localStorage.key(i);
+        if(k && k.startsWith("fb_sobre_")) {
+          const d = localStorage.getItem(k);
+          if(d) {
+            const s = JSON.parse(d);
+            if(s.userA === userId || s.userB === userId) sobres.push(s);
+          }
+        }
+      }
+      return sobres;
+    } catch(e) { return []; }
+  },
+  // Anular sobre
+  anular: (codigo, motivo) => {
+    try {
+      const d = localStorage.getItem("fb_sobre_" + codigo);
+      if(d) {
+        const s = JSON.parse(d);
+        s.estado = "anulado";
+        s.motivoAnulacion = motivo;
+        s.anuladoAt = Date.now();
+        localStorage.setItem("fb_sobre_" + codigo, JSON.stringify(s));
+      }
+    } catch(e) {}
+  },
+  // Confirmar retiro
+  confirmar: (codigo, userId) => {
+    try {
+      const d = localStorage.getItem("fb_sobre_" + codigo);
+      if(d) {
+        const s = JSON.parse(d);
+        if(s.userA === userId) s.confirmadoA = true;
+        if(s.userB === userId) s.confirmadoB = true;
+        if(s.confirmadoA && s.confirmadoB) s.estado = "completado";
+        localStorage.setItem("fb_sobre_" + codigo, JSON.stringify(s));
+        return s;
+      }
+    } catch(e) {}
+    return null;
+  },
+};
+
+// DB de reputación
+const DBRep = {
+  get: (userId) => {
+    try {
+      const d = localStorage.getItem("fb_rep_" + userId);
+      return d ? JSON.parse(d) : { puntos:5, total:1, resenas:[] };
+    } catch(e) { return { puntos:5, total:1, resenas:[] }; }
+  },
+  addResena: (userId, estrellas, comentario, deQuien) => {
+    try {
+      const rep = DBRep.get(userId);
+      rep.resenas.unshift({ estrellas, comentario, deQuien, fecha: Date.now() });
+      if(rep.resenas.length > 10) rep.resenas = rep.resenas.slice(0,10);
+      rep.puntos = Math.round((rep.puntos * rep.total + estrellas) / (rep.total + 1) * 10) / 10;
+      rep.total += 1;
+      localStorage.setItem("fb_rep_" + userId, JSON.stringify(rep));
+    } catch(e) {}
+  },
+  penalizar: (userId, puntos) => {
+    try {
+      const rep = DBRep.get(userId);
+      rep.puntos = Math.max(1, rep.puntos - puntos);
+      localStorage.setItem("fb_rep_" + userId, JSON.stringify(rep));
+    } catch(e) {}
+  },
+};
+
+
+// ═══════════════════════════════════════════════════════════
+//  SISTEMA DE RESERVA DE FIGURITAS
+//  Cuando se acepta un intercambio, las figuritas quedan
+//  reservadas y no pueden matchear con nadie más.
+//  Si se cancela, vuelven a estar disponibles.
+// ═══════════════════════════════════════════════════════════
+const DBReservas = {
+  // Reservar figuritas para un intercambio
+  reservar: (userId, figus, codigo) => {
+    try {
+      const key = "fb_reservas_" + userId;
+      const d = localStorage.getItem(key);
+      const reservas = d ? JSON.parse(d) : {};
+      figus.forEach(f => { reservas[f] = codigo; });
+      localStorage.setItem(key, JSON.stringify(reservas));
+    } catch(e) {}
+  },
+  // Liberar figuritas (cuando se cancela)
+  liberar: (userId, figus) => {
+    try {
+      const key = "fb_reservas_" + userId;
+      const d = localStorage.getItem(key);
+      if(!d) return;
+      const reservas = JSON.parse(d);
+      figus.forEach(f => { delete reservas[f]; });
+      localStorage.setItem(key, JSON.stringify(reservas));
+    } catch(e) {}
+  },
+  // Obtener figuritas reservadas de un usuario
+  getReservas: (userId) => {
+    try {
+      const d = localStorage.getItem("fb_reservas_" + userId);
+      return d ? JSON.parse(d) : {};
+    } catch(e) { return {}; }
+  },
+  // Verificar si una figurita está disponible
+  estaDisponible: (userId, figu) => {
+    const reservas = DBReservas.getReservas(userId);
+    return !reservas[figu];
+  },
+  // Liberar todas las reservas de un código de intercambio específico
+  liberarPorCodigo: (userId, codigo) => {
+    try {
+      const key = "fb_reservas_" + userId;
+      const d = localStorage.getItem(key);
+      const reservas = d ? JSON.parse(d) : {};
+      Object.keys(reservas).forEach(f => {
+        if(reservas[f] === codigo) delete reservas[f];
+      });
+      localStorage.setItem(key, JSON.stringify(reservas));
+    } catch(e) {}
+  },
+  // Filtrar solo las disponibles de una lista
+  soloDisponibles: (userId, figus) => {
+    const reservas = DBReservas.getReservas(userId);
+    return figus.filter(f => !reservas[f]);
+  },
+};
+
+
+// ═══════════════════════════════════════════════════════════
+//  SISTEMA DE RESERVAS — Primero en aceptar, primero en llevarse
+//  Cuando alguien acepta un intercambio, sus figuritas
+//  quedan RESERVADAS y no pueden matchear con nadie más.
+//  Si cancela, las figuritas vuelven a estar disponibles.
+
+
+// ─── MOTOR DE MATCHING ────────────────────────────────────────────────────────
+// Lógica correcta:
+//   - "repetida" = me sobra, la puedo dar
+//   - "tengo"    = la tengo (una sola)
+//   - no marcada = me falta → cualquiera puede dármela
+function calcularMatches(miUserId, miAlbumId, miFigus, todosLosUsuarios) {
+  const alb = ALBUMES.find(a => a.id === miAlbumId);
+  const todasLasFigus = (typeof TODAS_LAS_FIGUS !== "undefined" && TODAS_LAS_FIGUS.length > 0)
+    ? TODAS_LAS_FIGUS : (alb && alb.todas ? alb.todas : []);
+
+  const misReservas = DBReservas.getReservas(miUserId);
+  const misParaDar = Object.entries(miFigus)
+    .filter(([k,v]) => v === "repetida" && !misReservas[k])
+    .map(([k]) => k);
+  const misMarcadas = new Set(Object.keys(miFigus));
+
+  const matches = [];
+
+  for (const otroUser of todosLosUsuarios) {
+    if (otroUser.userId === miUserId) continue;
+    if (otroUser.albumId !== miAlbumId) continue;
+    const susFigus = DB.getFigus(otroUser.userId, miAlbumId);
+    if (!susFigus || Object.keys(susFigus).length === 0) continue;
+    const susReservas = DBReservas.getReservas(otroUser.userId);
+    const susParaDar = Object.entries(susFigus)
+      .filter(([k,v]) => v === "repetida" && !susReservas[k])
+      .map(([k]) => k);
+    const susMarcadas = new Set(Object.keys(susFigus));
+
+    // Lo que me falta = lo que NO tengo marcado (ni verde ni azul)
+    // Lo que al otro le falta = lo que él NO tiene marcado
+    // Si tenemos la lista completa la usamos, sino comparamos entre ellos
+    let yoLeDoy, elMeDa;
+    if (todasLasFigus.length > 0) {
+      const misFaltantes  = new Set(todasLasFigus.filter(c => !misMarcadas.has(c)));
+      const susFaltantes  = new Set(todasLasFigus.filter(c => !susMarcadas.has(c)));
+      yoLeDoy = misParaDar.filter(c => susFaltantes.has(c));
+      elMeDa  = susParaDar.filter(c => misFaltantes.has(c));
+    } else {
+      // Fallback: lo que el otro no tiene marcado le falta
+      yoLeDoy = misParaDar.filter(c => !susMarcadas.has(c));
+      elMeDa  = susParaDar.filter(c => !misMarcadas.has(c));
+    }
+
+    if (yoLeDoy.length > 0 && elMeDa.length > 0) {
+      // El intercambio incluye TODAS las figuritas disponibles de cada lado
+      // sin importar cantidad ni país — lo que importa es que ambos ganen
+      matches.push({
+        userId: otroUser.userId, apodo: otroUser.apodo,
+        barrio: otroUser.barrio, edad: otroUser.edad,
+        esAdulto: otroUser.edad >= 18, avatar: otroUser.avatar,
+        yoLeDoy: yoLeDoy,
+        elMeDa:  elMeDa,
+        yoLeDoyExtra: [],
+        elMeDaExtra:  [],
+        score: yoLeDoy.length + elMeDa.length,
+      });
+    }
+  }
+  return matches.sort((a, b) => b.score - a.score);
+}
+
+// ─── PALETA ───────────────────────────────────────────────────────────────────
+const C = {
+  sky:       "#75BFEC", blue:      "#3D8EC9", blueDark:  "#1A5F8C",
+  blueDeep:  "#0D3D5C", blueLight: "#C8E6F8", bluePale:  "#EBF6FF",
+  gold:      "#F5C518", goldDeep:  "#C9960A",
+  white:     "#FFFFFF", muted:     "#6B9AB8",
+  red:       "#E8162B", green:     "#2ECC71", greenDeep: "#1A9E52",
+};
+
+// ─── STICKERS SVG ─────────────────────────────────────────────────────────────
+const S = {
+  Sol: ({ size=44 }) => (
+    <svg width={size} height={size} viewBox="0 0 80 80">
+      {Array.from({length:16},(_,i)=>{const a=(i*22.5-90)*Math.PI/180,r1=24,r2=i%2===0?36:30;
+        return <line key={i} x1={40+r1*Math.cos(a)} y1={40+r1*Math.sin(a)} x2={40+r2*Math.cos(a)} y2={40+r2*Math.sin(a)} stroke={C.goldDeep} strokeWidth="3" strokeLinecap="round"/>;})}
+      <circle cx="40" cy="40" r="20" fill={C.gold} stroke={C.goldDeep} strokeWidth="2.5"/>
+      <ellipse cx="33" cy="36" rx="3" ry="3.5" fill={C.goldDeep}/>
+      <ellipse cx="47" cy="36" rx="3" ry="3.5" fill={C.goldDeep}/>
+      <path d="M32 47 Q40 53 48 47" stroke={C.goldDeep} strokeWidth="2.5" fill="none" strokeLinecap="round"/>
+    </svg>
+  ),
+  Bandera: ({ size=56 }) => (
+    <svg width={size} height={size*0.62} viewBox="0 0 90 56">
+      <rect x="1" y="1" width="88" height="54" rx="5" fill={C.white} stroke={C.blueDark} strokeWidth="2"/>
+      <rect x="1" y="1" width="88" height="18" rx="5" fill={C.sky}/>
+      <rect x="1" y="37" width="88" height="18" rx="5" fill={C.sky}/>
+      <rect x="1" y="1" width="88" height="5" rx="2" fill={C.sky}/>
+      <rect x="1" y="50" width="88" height="5" rx="2" fill={C.sky}/>
+      {Array.from({length:12},(_,i)=>{const a=(i*30-90)*Math.PI/180;
+        return <line key={i} x1={45+10*Math.cos(a)} y1={28+10*Math.sin(a)} x2={45+14*Math.cos(a)} y2={28+14*Math.sin(a)} stroke={C.gold} strokeWidth="2" strokeLinecap="round"/>;})
+      }
+      <circle cx="45" cy="28" r="8" fill={C.gold} stroke={C.goldDeep} strokeWidth="1.5"/>
+    </svg>
+  ),
+  Mate: ({ size=44 }) => (
+    <svg width={size} height={size} viewBox="0 0 80 80">
+      <rect x="36" y="8" width="8" height="28" rx="4" fill={C.goldDeep} stroke={C.blueDark} strokeWidth="1.5"/>
+      <ellipse cx="40" cy="36" rx="7" ry="4" fill={C.goldDeep} stroke={C.blueDark} strokeWidth="1.5"/>
+      <ellipse cx="40" cy="42" rx="20" ry="7" fill={C.greenDeep} stroke={C.blueDark} strokeWidth="2"/>
+      <path d="M20 42 Q18 66 40 68 Q62 66 60 42 Z" fill="#8B5E3C" stroke={C.blueDark} strokeWidth="2.5"/>
+      <ellipse cx="40" cy="42" rx="20" ry="5" fill="#9B6E4A" stroke={C.blueDark} strokeWidth="2"/>
+    </svg>
+  ),
+  Pelota: ({ size=44 }) => (
+    <svg width={size} height={size} viewBox="0 0 80 80">
+      <circle cx="40" cy="40" r="36" fill={C.white} stroke={C.blueDark} strokeWidth="2.5"/>
+      <polygon points="40,16 52,26 48,40 32,40 28,26" fill={C.blueDeep} stroke={C.blueDark} strokeWidth="1.5"/>
+      <polygon points="16,32 28,26 32,40 20,50 10,42" fill={C.blueDeep} stroke={C.blueDark} strokeWidth="1.5"/>
+      <polygon points="64,32 52,26 48,40 60,50 70,42" fill={C.blueDeep} stroke={C.blueDark} strokeWidth="1.5"/>
+      <polygon points="24,62 20,50 32,40 48,40 60,50 56,62 40,66" fill={C.blueDeep} stroke={C.blueDark} strokeWidth="1.5"/>
+    </svg>
+  ),
+  Capibara: ({ size=48 }) => (
+    <svg width={size} height={size} viewBox="0 0 80 80">
+      <ellipse cx="40" cy="52" rx="26" ry="18" fill="#C4934A" stroke={C.blueDark} strokeWidth="2.5"/>
+      <ellipse cx="40" cy="34" rx="20" ry="17" fill="#C4934A" stroke={C.blueDark} strokeWidth="2.5"/>
+      <ellipse cx="40" cy="42" rx="10" ry="7" fill="#A07030" stroke={C.blueDark} strokeWidth="1.5"/>
+      <circle cx="32" cy="30" r="3.5" fill={C.blueDeep}/><circle cx="48" cy="30" r="3.5" fill={C.blueDeep}/>
+      <circle cx="33" cy="29" r="1.2" fill={C.white}/><circle cx="49" cy="29" r="1.2" fill={C.white}/>
+      <rect x="24" y="14" width="32" height="12" rx="3" fill={C.blue} stroke={C.blueDark} strokeWidth="2"/>
+      <rect x="20" y="24" width="40" height="5" rx="2" fill={C.sky} stroke={C.blueDark} strokeWidth="2"/>
+      <rect x="24" y="20" width="32" height="4" fill={C.gold}/>
+    </svg>
+  ),
+  Empanada: ({ size=44 }) => (
+    <svg width={size} height={size*0.7} viewBox="0 0 80 56">
+      <path d="M8 28 Q10 8 40 6 Q70 8 72 28 Q70 50 40 52 Q10 50 8 28Z" fill={C.gold} stroke={C.goldDeep} strokeWidth="2.5"/>
+      {[0,1,2,3,4,5,6].map(i=><circle key={i} cx={20+i*8} cy={10+(i%2===0?0:3)} r="3" fill={C.goldDeep} stroke={C.gold} strokeWidth="1"/>)}
+    </svg>
+  ),
+  Camiseta: ({ size=48 }) => (
+    <svg width={size} height={size} viewBox="0 0 80 80">
+      <path d="M20 25 L10 35 L20 40 L20 70 L60 70 L60 40 L70 35 L60 25 L50 15 Q40 20 30 15 Z" fill={C.white} stroke={C.blueDark} strokeWidth="2.5"/>
+      <path d="M32 15 Q40 20 48 15 L50 25 Q40 30 30 25 Z" fill={C.sky}/>
+      <rect x="28" y="27" width="24" height="8" fill={C.sky}/>
+      <rect x="28" y="43" width="24" height="8" fill={C.sky}/>
+      <rect x="28" y="59" width="24" height="9" fill={C.sky}/>
+      <path d="M20 25 L10 35 L20 40" fill={C.sky} stroke={C.blueDark} strokeWidth="1.5"/>
+      <path d="M60 25 L70 35 L60 40" fill={C.sky} stroke={C.blueDark} strokeWidth="1.5"/>
+    </svg>
+  ),
+  Medialuna: ({ size=44 }) => (
+    <svg width={size} height={size*0.75} viewBox="0 0 80 60">
+      <path d="M10 50 Q5 20 30 8 Q55 -2 70 15 Q60 10 45 20 Q25 35 20 55 Z" fill={C.gold} stroke={C.goldDeep} strokeWidth="2.5"/>
+      <path d="M20 55 Q35 30 55 18 Q70 10 75 20 Q65 15 50 28 Q30 44 22 58 Z" fill={C.goldDeep} opacity="0.5"/>
+    </svg>
+  ),
+  Bandoneon: ({ size=44 }) => (
+    <svg width={size} height={size*0.7} viewBox="0 0 80 56">
+      {[0,1,2,3,4,5].map(i=>(
+        <rect key={i} x={8+i*11} y="8" width="9" height="40" rx="2"
+          fill={i%2===0?C.sky:C.blue} stroke={C.blueDark} strokeWidth="1.5"/>
+      ))}
+      <rect x="5" y="5" width="70" height="12" rx="4" fill={C.blueDark}/>
+      <rect x="5" y="39" width="70" height="12" rx="4" fill={C.blueDark}/>
+      {[0,1,2,3,4,5].map(i=>(
+        <circle key={i} cx={12+i*11} cy="11" r="3" fill={C.gold}/>
+      ))}
+      {[0,1,2,3,4,5].map(i=>(
+        <circle key={i+6} cx={12+i*11} cy="45" r="3" fill={C.gold}/>
+      ))}
+    </svg>
+  ),
+  Estrella: ({ size=18 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24">
+      <polygon points="12,2 15,9 22,9 16.5,14 18.5,21 12,17 5.5,21 7.5,14 2,9 9,9" fill={C.gold} stroke={C.goldDeep} strokeWidth="1.5" strokeLinejoin="round"/>
+    </svg>
+  ),
+};
+
+const AVATARES = ["capibara","sol","pelota","mate","empanada","camiseta","bandera","medialuna","estrella","bandoneon"];
+
+function AvatarSticker({ av, size=28 }) {
+  switch(av) {
+    case "capibara":  return React.createElement(S.Capibara, {size});
+    case "sol":       return React.createElement(S.Sol, {size});
+    case "pelota":    return React.createElement(S.Pelota, {size});
+    case "mate":      return React.createElement(S.Mate, {size});
+    case "empanada":  return React.createElement(S.Empanada, {size});
+    case "camiseta":  return React.createElement(S.Camiseta, {size});
+    case "bandera":   return React.createElement(S.Bandera, {size});
+    case "medialuna": return React.createElement(S.Medialuna, {size});
+    case "estrella":  return React.createElement(S.Estrella, {size});
+    case "bandoneon": return React.createElement(S.Bandoneon, {size});
+    default:          return React.createElement(S.Sol, {size});
+  }
+}
+
+function StickerBg({ opacity=0.08 }) {
+  const items = [
+    {x:"4%",  y:"6%",  rot:-15, el:<S.Sol size={55}/>},
+    {x:"74%", y:"4%",  rot:12,  el:<S.Pelota size={48}/>},
+    {x:"58%", y:"52%", rot:-8,  el:<S.Capibara size={54}/>},
+    {x:"2%",  y:"54%", rot:10,  el:<S.Mate size={50}/>},
+    {x:"80%", y:"76%", rot:15,  el:<S.Sol size={42}/>},
+    {x:"14%", y:"78%", rot:-20, el:<S.Pelota size={40}/>},
+    {x:"44%", y:"22%", rot:5,   el:<S.Bandera size={58}/>},
+    {x:"68%", y:"33%", rot:-10, el:<S.Empanada size={46}/>},
+    {x:"28%", y:"65%", rot:18,  el:<S.Camiseta size={48}/>},
+    {x:"86%", y:"18%", rot:-5,  el:<S.Capibara size={44}/>},
+  ];
+  return (
+    <div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none",opacity}}>
+      {items.map((it,i)=>(
+        <div key={i} style={{position:"absolute",left:it.x,top:it.y,transform:`rotate(${it.rot}deg)`}}>{it.el}</div>
+      ))}
+    </div>
+  );
+}
+
+// ─── DATOS ────────────────────────────────────────────────────────────────────
+const BARRIOS = ["Agronomía","Almagro","Balvanera","Barracas","Belgrano","Boedo","Caballito","Chacarita","Coghlan","Colegiales","Constitución","Flores","Floresta","La Boca","La Paternal","Liniers","Lugano","Mataderos","Monte Castro","Montserrat","Nueva Pompeya","Núñez","Palermo","Parque Avellaneda","Parque Chacabuco","Parque Chas","Parque Patricios","Paternal","Puerto Madero","Recoleta","Retiro","Saavedra","San Cristóbal","San Nicolás","San Telmo","Versailles","Villa Crespo","Villa del Parque","Villa Devoto","Villa General Mitre","Villa Lugano","Villa Luro","Villa Ortúzar","Villa Pueyrredón","Villa Real","Villa Riachuelo","Villa Santa Rita","Villa Soldati","Villa Urquiza"].sort();
+
+var GRUPOS_PAISES = [
+  
+  { cod:"00", nombre:"Figurita 00", figus:["00"] },
+  { cod:"FWC", nombre:"FIFA World Cup 🏆", figus:["FWC1", "FWC2", "FWC3", "FWC4", "FWC5", "FWC6", "FWC7", "FWC8", "FWC9", "FWC10", "FWC11", "FWC12", "FWC13", "FWC14", "FWC15", "FWC16", "FWC17", "FWC18", "FWC19"] },
+  { cod:"MEX", nombre:"México 🇲🇽", figus:["MEX1", "MEX2", "MEX3", "MEX4", "MEX5", "MEX6", "MEX7", "MEX8", "MEX9", "MEX10", "MEX11", "MEX12", "MEX13", "MEX14", "MEX15", "MEX16", "MEX17", "MEX18", "MEX19", "MEX20"] },
+  { cod:"RSA", nombre:"Sudáfrica 🇿🇦", figus:["RSA1", "RSA2", "RSA3", "RSA4", "RSA5", "RSA6", "RSA7", "RSA8", "RSA9", "RSA10", "RSA11", "RSA12", "RSA13", "RSA14", "RSA15", "RSA16", "RSA17", "RSA18", "RSA19", "RSA20"] },
+  { cod:"KOR", nombre:"Corea del Sur 🇰🇷", figus:["KOR1", "KOR2", "KOR3", "KOR4", "KOR5", "KOR6", "KOR7", "KOR8", "KOR9", "KOR10", "KOR11", "KOR12", "KOR13", "KOR14", "KOR15", "KOR16", "KOR17", "KOR18", "KOR19", "KOR20"] },
+  { cod:"CZE", nombre:"Rep. Checa 🇨🇿", figus:["CZE1", "CZE2", "CZE3", "CZE4", "CZE5", "CZE6", "CZE7", "CZE8", "CZE9", "CZE10", "CZE11", "CZE12", "CZE13", "CZE14", "CZE15", "CZE16", "CZE17", "CZE18", "CZE19", "CZE20"] },
+  { cod:"CAN", nombre:"Canadá 🇨🇦", figus:["CAN1", "CAN2", "CAN3", "CAN4", "CAN5", "CAN6", "CAN7", "CAN8", "CAN9", "CAN10", "CAN11", "CAN12", "CAN13", "CAN14", "CAN15", "CAN16", "CAN17", "CAN18", "CAN19", "CAN20"] },
+  { cod:"BIH", nombre:"Bosnia 🇧🇦", figus:["BIH1", "BIH2", "BIH3", "BIH4", "BIH5", "BIH6", "BIH7", "BIH8", "BIH9", "BIH10", "BIH11", "BIH12", "BIH13", "BIH14", "BIH15", "BIH16", "BIH17", "BIH18", "BIH19", "BIH20"] },
+  { cod:"QAT", nombre:"Qatar 🇶🇦", figus:["QAT1", "QAT2", "QAT3", "QAT4", "QAT5", "QAT6", "QAT7", "QAT8", "QAT9", "QAT10", "QAT11", "QAT12", "QAT13", "QAT14", "QAT15", "QAT16", "QAT17", "QAT18", "QAT19", "QAT20"] },
+  { cod:"SUI", nombre:"Suiza 🇨🇭", figus:["SUI1", "SUI2", "SUI3", "SUI4", "SUI5", "SUI6", "SUI7", "SUI8", "SUI9", "SUI10", "SUI11", "SUI12", "SUI13", "SUI14", "SUI15", "SUI16", "SUI17", "SUI18", "SUI19", "SUI20"] },
+  { cod:"BRA", nombre:"Brasil 🇧🇷", figus:["BRA1", "BRA2", "BRA3", "BRA4", "BRA5", "BRA6", "BRA7", "BRA8", "BRA9", "BRA10", "BRA11", "BRA12", "BRA13", "BRA14", "BRA15", "BRA16", "BRA17", "BRA18", "BRA19", "BRA20"] },
+  { cod:"MAR", nombre:"Marruecos 🇲🇦", figus:["MAR1", "MAR2", "MAR3", "MAR4", "MAR5", "MAR6", "MAR7", "MAR8", "MAR9", "MAR10", "MAR11", "MAR12", "MAR13", "MAR14", "MAR15", "MAR16", "MAR17", "MAR18", "MAR19", "MAR20"] },
+  { cod:"HAI", nombre:"Haití 🇭🇹", figus:["HAI1", "HAI2", "HAI3", "HAI4", "HAI5", "HAI6", "HAI7", "HAI8", "HAI9", "HAI10", "HAI11", "HAI12", "HAI13", "HAI14", "HAI15", "HAI16", "HAI17", "HAI18", "HAI19", "HAI20"] },
+  { cod:"SCO", nombre:"Escocia", figus:["SCO1", "SCO2", "SCO3", "SCO4", "SCO5", "SCO6", "SCO7", "SCO8", "SCO9", "SCO10", "SCO11", "SCO12", "SCO13", "SCO14", "SCO15", "SCO16", "SCO17", "SCO18", "SCO19", "SCO20"] },
+  { cod:"USA", nombre:"USA 🇺🇸", figus:["USA1", "USA2", "USA3", "USA4", "USA5", "USA6", "USA7", "USA8", "USA9", "USA10", "USA11", "USA12", "USA13", "USA14", "USA15", "USA16", "USA17", "USA18", "USA19", "USA20"] },
+  { cod:"PAR", nombre:"Paraguay 🇵🇾", figus:["PAR1", "PAR2", "PAR3", "PAR4", "PAR5", "PAR6", "PAR7", "PAR8", "PAR9", "PAR10", "PAR11", "PAR12", "PAR13", "PAR14", "PAR15", "PAR16", "PAR17", "PAR18", "PAR19", "PAR20"] },
+  { cod:"AUS", nombre:"Australia 🇦🇺", figus:["AUS1", "AUS2", "AUS3", "AUS4", "AUS5", "AUS6", "AUS7", "AUS8", "AUS9", "AUS10", "AUS11", "AUS12", "AUS13", "AUS14", "AUS15", "AUS16", "AUS17", "AUS18", "AUS19", "AUS20"] },
+  { cod:"TUR", nombre:"Turquía 🇹🇷", figus:["TUR1", "TUR2", "TUR3", "TUR4", "TUR5", "TUR6", "TUR7", "TUR8", "TUR9", "TUR10", "TUR11", "TUR12", "TUR13", "TUR14", "TUR15", "TUR16", "TUR17", "TUR18", "TUR19", "TUR20"] },
+  { cod:"GER", nombre:"Alemania 🇩🇪", figus:["GER1", "GER2", "GER3", "GER4", "GER5", "GER6", "GER7", "GER8", "GER9", "GER10", "GER11", "GER12", "GER13", "GER14", "GER15", "GER16", "GER17", "GER18", "GER19", "GER20"] },
+  { cod:"CUW", nombre:"Kuwait 🇰🇼", figus:["CUW1", "CUW2", "CUW3", "CUW4", "CUW5", "CUW6", "CUW7", "CUW8", "CUW9", "CUW10", "CUW11", "CUW12", "CUW13", "CUW14", "CUW15", "CUW16", "CUW17", "CUW18", "CUW19", "CUW20"] },
+  { cod:"CIV", nombre:"Costa de Marfil 🇨🇮", figus:["CIV1", "CIV2", "CIV3", "CIV4", "CIV5", "CIV6", "CIV7", "CIV8", "CIV9", "CIV10", "CIV11", "CIV12", "CIV13", "CIV14", "CIV15", "CIV16", "CIV17", "CIV18", "CIV19", "CIV20"] },
+  { cod:"ECU", nombre:"Ecuador 🇪🇨", figus:["ECU1", "ECU2", "ECU3", "ECU4", "ECU5", "ECU6", "ECU7", "ECU8", "ECU9", "ECU10", "ECU11", "ECU12", "ECU13", "ECU14", "ECU15", "ECU16", "ECU17", "ECU18", "ECU19", "ECU20"] },
+  { cod:"NED", nombre:"Países Bajos 🇳🇱", figus:["NED1", "NED2", "NED3", "NED4", "NED5", "NED6", "NED7", "NED8", "NED9", "NED10", "NED11", "NED12", "NED13", "NED14", "NED15", "NED16", "NED17", "NED18", "NED19", "NED20"] },
+  { cod:"JPN", nombre:"Japón 🇯🇵", figus:["JPN1", "JPN2", "JPN3", "JPN4", "JPN5", "JPN6", "JPN7", "JPN8", "JPN9", "JPN10", "JPN11", "JPN12", "JPN13", "JPN14", "JPN15", "JPN16", "JPN17", "JPN18", "JPN19", "JPN20"] },
+  { cod:"SWE", nombre:"Suecia 🇸🇪", figus:["SWE1", "SWE2", "SWE3", "SWE4", "SWE5", "SWE6", "SWE7", "SWE8", "SWE9", "SWE10", "SWE11", "SWE12", "SWE13", "SWE14", "SWE15", "SWE16", "SWE17", "SWE18", "SWE19", "SWE20"] },
+  { cod:"TUN", nombre:"Túnez 🇹🇳", figus:["TUN1", "TUN2", "TUN3", "TUN4", "TUN5", "TUN6", "TUN7", "TUN8", "TUN9", "TUN10", "TUN11", "TUN12", "TUN13", "TUN14", "TUN15", "TUN16", "TUN17", "TUN18", "TUN19", "TUN20"] },
+  { cod:"BRL", nombre:"Bélgica 🇧🇪", figus:["BRL1", "BRL2", "BRL3", "BRL4", "BRL5", "BRL6", "BRL7", "BRL8", "BRL9", "BRL10", "BRL11", "BRL12", "BRL13", "BRL14", "BRL15", "BRL16", "BRL17", "BRL18", "BRL19", "BRL20"] },
+  { cod:"EGY", nombre:"Egipto 🇪🇬", figus:["EGY1", "EGY2", "EGY3", "EGY4", "EGY5", "EGY6", "EGY7", "EGY8", "EGY9", "EGY10", "EGY11", "EGY12", "EGY13", "EGY14", "EGY15", "EGY16", "EGY17", "EGY18", "EGY19", "EGY20"] },
+  { cod:"IRN", nombre:"Irán 🇮🇷", figus:["IRN1", "IRN2", "IRN3", "IRN4", "IRN5", "IRN6", "IRN7", "IRN8", "IRN9", "IRN10", "IRN11", "IRN12", "IRN13", "IRN14", "IRN15", "IRN16", "IRN17", "IRN18", "IRN19", "IRN20"] },
+  { cod:"NZL", nombre:"Nueva Zelanda 🇳🇿", figus:["NZL1", "NZL2", "NZL3", "NZL4", "NZL5", "NZL6", "NZL7", "NZL8", "NZL9", "NZL10", "NZL11", "NZL12", "NZL13", "NZL14", "NZL15", "NZL16", "NZL17", "NZL18", "NZL19", "NZL20"] },
+  { cod:"ESP", nombre:"España 🇪🇸", figus:["ESP1", "ESP2", "ESP3", "ESP4", "ESP5", "ESP6", "ESP7", "ESP8", "ESP9", "ESP10", "ESP11", "ESP12", "ESP13", "ESP14", "ESP15", "ESP16", "ESP17", "ESP18", "ESP19", "ESP20"] },
+  { cod:"CPV", nombre:"Cabo Verde 🇨🇻", figus:["CPV1", "CPV2", "CPV3", "CPV4", "CPV5", "CPV6", "CPV7", "CPV8", "CPV9", "CPV10", "CPV11", "CPV12", "CPV13", "CPV14", "CPV15", "CPV16", "CPV17", "CPV18", "CPV19", "CPV20"] },
+  { cod:"KSA", nombre:"Arabia Saudita 🇸🇦", figus:["KSA1", "KSA2", "KSA3", "KSA4", "KSA5", "KSA6", "KSA7", "KSA8", "KSA9", "KSA10", "KSA11", "KSA12", "KSA13", "KSA14", "KSA15", "KSA16", "KSA17", "KSA18", "KSA19", "KSA20"] },
+  { cod:"URU", nombre:"Uruguay 🇺🇾", figus:["URU1", "URU2", "URU3", "URU4", "URU5", "URU6", "URU7", "URU8", "URU9", "URU10", "URU11", "URU12", "URU13", "URU14", "URU15", "URU16", "URU17", "URU18", "URU19", "URU20"] },
+  { cod:"FRA", nombre:"Francia 🇫🇷", figus:["FRA1", "FRA2", "FRA3", "FRA4", "FRA5", "FRA6", "FRA7", "FRA8", "FRA9", "FRA10", "FRA11", "FRA12", "FRA13", "FRA14", "FRA15", "FRA16", "FRA17", "FRA18", "FRA19", "FRA20"] },
+  { cod:"SEN", nombre:"Senegal 🇸🇳", figus:["SEN1", "SEN2", "SEN3", "SEN4", "SEN5", "SEN6", "SEN7", "SEN8", "SEN9", "SEN10", "SEN11", "SEN12", "SEN13", "SEN14", "SEN15", "SEN16", "SEN17", "SEN18", "SEN19", "SEN20"] },
+  { cod:"IRQ", nombre:"Irak 🇮🇶", figus:["IRQ1", "IRQ2", "IRQ3", "IRQ4", "IRQ5", "IRQ6", "IRQ7", "IRQ8", "IRQ9", "IRQ10", "IRQ11", "IRQ12", "IRQ13", "IRQ14", "IRQ15", "IRQ16", "IRQ17", "IRQ18", "IRQ19", "IRQ20"] },
+  { cod:"NOR", nombre:"Noruega 🇳🇴", figus:["NOR1", "NOR2", "NOR3", "NOR4", "NOR5", "NOR6", "NOR7", "NOR8", "NOR9", "NOR10", "NOR11", "NOR12", "NOR13", "NOR14", "NOR15", "NOR16", "NOR17", "NOR18", "NOR19", "NOR20"] },
+  { cod:"ARG", nombre:"Argentina 🇦🇷", figus:["ARG1", "ARG2", "ARG3", "ARG4", "ARG5", "ARG6", "ARG7", "ARG8", "ARG9", "ARG10", "ARG11", "ARG12", "ARG13", "ARG14", "ARG15", "ARG16", "ARG17", "ARG18", "ARG19", "ARG20"] },
+  { cod:"ALG", nombre:"Algeria 🇩🇿", figus:["ALG1", "ALG2", "ALG3", "ALG4", "ALG5", "ALG6", "ALG7", "ALG8", "ALG9", "ALG10", "ALG11", "ALG12", "ALG13", "ALG14", "ALG15", "ALG16", "ALG17", "ALG18", "ALG19", "ALG20"] },
+  { cod:"AUT", nombre:"Austria 🇦🇹", figus:["AUT1", "AUT2", "AUT3", "AUT4", "AUT5", "AUT6", "AUT7", "AUT8", "AUT9", "AUT10", "AUT11", "AUT12", "AUT13", "AUT14", "AUT15", "AUT16", "AUT17", "AUT18", "AUT19", "AUT20"] },
+  { cod:"JOR", nombre:"Jordania 🇯🇴", figus:["JOR1", "JOR2", "JOR3", "JOR4", "JOR5", "JOR6", "JOR7", "JOR8", "JOR9", "JOR10", "JOR11", "JOR12", "JOR13", "JOR14", "JOR15", "JOR16", "JOR17", "JOR18", "JOR19", "JOR20"] },
+  { cod:"POR", nombre:"Portugal 🇵🇹", figus:["POR1", "POR2", "POR3", "POR4", "POR5", "POR6", "POR7", "POR8", "POR9", "POR10", "POR11", "POR12", "POR13", "POR14", "POR15", "POR16", "POR17", "POR18", "POR19", "POR20"] },
+  { cod:"COD", nombre:"Congo 🇨🇩", figus:["COD1", "COD2", "COD3", "COD4", "COD5", "COD6", "COD7", "COD8", "COD9", "COD10", "COD11", "COD12", "COD13", "COD14", "COD15", "COD16", "COD17", "COD18", "COD19", "COD20"] },
+  { cod:"UZB", nombre:"Uzbekistán 🇺🇿", figus:["UZB1", "UZB2", "UZB3", "UZB4", "UZB5", "UZB6", "UZB7", "UZB8", "UZB9", "UZB10", "UZB11", "UZB12", "UZB13", "UZB14", "UZB15", "UZB16", "UZB17", "UZB18", "UZB19", "UZB20"] },
+  { cod:"COL", nombre:"Colombia 🇨🇴", figus:["COL1", "COL2", "COL3", "COL4", "COL5", "COL6", "COL7", "COL8", "COL9", "COL10", "COL11", "COL12", "COL13", "COL14", "COL15", "COL16", "COL17", "COL18", "COL19", "COL20"] },
+  { cod:"ENG", nombre:"Inglaterra", figus:["ENG1", "ENG2", "ENG3", "ENG4", "ENG5", "ENG6", "ENG7", "ENG8", "ENG9", "ENG10", "ENG11", "ENG12", "ENG13", "ENG14", "ENG15", "ENG16", "ENG17", "ENG18", "ENG19", "ENG20"] },
+  { cod:"CRO", nombre:"Croacia 🇭🇷", figus:["CRO1", "CRO2", "CRO3", "CRO4", "CRO5", "CRO6", "CRO7", "CRO8", "CRO9", "CRO10", "CRO11", "CRO12", "CRO13", "CRO14", "CRO15", "CRO16", "CRO17", "CRO18", "CRO19", "CRO20"] },
+  { cod:"GHA", nombre:"Ghana 🇬🇭", figus:["GHA1", "GHA2", "GHA3", "GHA4", "GHA5", "GHA6", "GHA7", "GHA8", "GHA9", "GHA10", "GHA11", "GHA12", "GHA13", "GHA14", "GHA15", "GHA16", "GHA17", "GHA18", "GHA19", "GHA20"] },
+  { cod:"PAN", nombre:"Panamá 🇵🇦", figus:["PAN1", "PAN2", "PAN3", "PAN4", "PAN5", "PAN6", "PAN7", "PAN8", "PAN9", "PAN10", "PAN11", "PAN12", "PAN13", "PAN14", "PAN15", "PAN16", "PAN17", "PAN18", "PAN19", "PAN20"] },
+
+  { cod:"CC", nombre:"Coca Cola", figus:["CC1", "CC2", "CC3", "CC4", "CC5", "CC6", "CC7", "CC8", "CC9", "CC10", "CC11", "CC12", "CC13", "CC14"] },
+];
+
+// Lista plana de todos los códigos
+var TODAS_LAS_FIGUS = ["00", "FWC1", "FWC2", "FWC3", "FWC4", "FWC5", "FWC6", "FWC7", "FWC8", "MEX1", "MEX2", "MEX3", "MEX4", "MEX5", "MEX6", "MEX7", "MEX8", "MEX9", "MEX10", "MEX11", "MEX12", "MEX13", "MEX14", "MEX15", "MEX16", "MEX17", "MEX18", "MEX19", "MEX20", "RSA1", "RSA2", "RSA3", "RSA4", "RSA5", "RSA6", "RSA7", "RSA8", "RSA9", "RSA10", "RSA11", "RSA12", "RSA13", "RSA14", "RSA15", "RSA16", "RSA17", "RSA18", "RSA19", "RSA20", "KOR1", "KOR2", "KOR3", "KOR4", "KOR5", "KOR6", "KOR7", "KOR8", "KOR9", "KOR10", "KOR11", "KOR12", "KOR13", "KOR14", "KOR15", "KOR16", "KOR17", "KOR18", "KOR19", "KOR20", "CZE1", "CZE2", "CZE3", "CZE4", "CZE5", "CZE6", "CZE7", "CZE8", "CZE9", "CZE10", "CZE11", "CZE12", "CZE13", "CZE14", "CZE15", "CZE16", "CZE17", "CZE18", "CZE19", "CZE20", "CAN1", "CAN2", "CAN3", "CAN4", "CAN5", "CAN6", "CAN7", "CAN8", "CAN9", "CAN10", "CAN11", "CAN12", "CAN13", "CAN14", "CAN15", "CAN16", "CAN17", "CAN18", "CAN19", "CAN20", "BIH1", "BIH2", "BIH3", "BIH4", "BIH5", "BIH6", "BIH7", "BIH8", "BIH9", "BIH10", "BIH11", "BIH12", "BIH13", "BIH14", "BIH15", "BIH16", "BIH17", "BIH18", "BIH19", "BIH20", "QAT1", "QAT2", "QAT3", "QAT4", "QAT5", "QAT6", "QAT7", "QAT8", "QAT9", "QAT10", "QAT11", "QAT12", "QAT13", "QAT14", "QAT15", "QAT16", "QAT17", "QAT18", "QAT19", "QAT20", "SUI1", "SUI2", "SUI3", "SUI4", "SUI5", "SUI6", "SUI7", "SUI8", "SUI9", "SUI10", "SUI11", "SUI12", "SUI13", "SUI14", "SUI15", "SUI16", "SUI17", "SUI18", "SUI19", "SUI20", "BRA1", "BRA2", "BRA3", "BRA4", "BRA5", "BRA6", "BRA7", "BRA8", "BRA9", "BRA10", "BRA11", "BRA12", "BRA13", "BRA14", "BRA15", "BRA16", "BRA17", "BRA18", "BRA19", "BRA20", "MAR1", "MAR2", "MAR3", "MAR4", "MAR5", "MAR6", "MAR7", "MAR8", "MAR9", "MAR10", "MAR11", "MAR12", "MAR13", "MAR14", "MAR15", "MAR16", "MAR17", "MAR18", "MAR19", "MAR20", "HAI1", "HAI2", "HAI3", "HAI4", "HAI5", "HAI6", "HAI7", "HAI8", "HAI9", "HAI10", "HAI11", "HAI12", "HAI13", "HAI14", "HAI15", "HAI16", "HAI17", "HAI18", "HAI19", "HAI20", "SCO1", "SCO2", "SCO3", "SCO4", "SCO5", "SCO6", "SCO7", "SCO8", "SCO9", "SCO10", "SCO11", "SCO12", "SCO13", "SCO14", "SCO15", "SCO16", "SCO17", "SCO18", "SCO19", "SCO20", "USA1", "USA2", "USA3", "USA4", "USA5", "USA6", "USA7", "USA8", "USA9", "USA10", "USA11", "USA12", "USA13", "USA14", "USA15", "USA16", "USA17", "USA18", "USA19", "USA20", "PAR1", "PAR2", "PAR3", "PAR4", "PAR5", "PAR6", "PAR7", "PAR8", "PAR9", "PAR10", "PAR11", "PAR12", "PAR13", "PAR14", "PAR15", "PAR16", "PAR17", "PAR18", "PAR19", "PAR20", "AUS1", "AUS2", "AUS3", "AUS4", "AUS5", "AUS6", "AUS7", "AUS8", "AUS9", "AUS10", "AUS11", "AUS12", "AUS13", "AUS14", "AUS15", "AUS16", "AUS17", "AUS18", "AUS19", "AUS20", "TUR1", "TUR2", "TUR3", "TUR4", "TUR5", "TUR6", "TUR7", "TUR8", "TUR9", "TUR10", "TUR11", "TUR12", "TUR13", "TUR14", "TUR15", "TUR16", "TUR17", "TUR18", "TUR19", "TUR20", "GER1", "GER2", "GER3", "GER4", "GER5", "GER6", "GER7", "GER8", "GER9", "GER10", "GER11", "GER12", "GER13", "GER14", "GER15", "GER16", "GER17", "GER18", "GER19", "GER20", "CUW1", "CUW2", "CUW3", "CUW4", "CUW5", "CUW6", "CUW7", "CUW8", "CUW9", "CUW10", "CUW11", "CUW12", "CUW13", "CUW14", "CUW15", "CUW16", "CUW17", "CUW18", "CUW19", "CUW20", "CIV1", "CIV2", "CIV3", "CIV4", "CIV5", "CIV6", "CIV7", "CIV8", "CIV9", "CIV10", "CIV11", "CIV12", "CIV13", "CIV14", "CIV15", "CIV16", "CIV17", "CIV18", "CIV19", "CIV20", "ECU1", "ECU2", "ECU3", "ECU4", "ECU5", "ECU6", "ECU7", "ECU8", "ECU9", "ECU10", "ECU11", "ECU12", "ECU13", "ECU14", "ECU15", "ECU16", "ECU17", "ECU18", "ECU19", "ECU20", "NED1", "NED2", "NED3", "NED4", "NED5", "NED6", "NED7", "NED8", "NED9", "NED10", "NED11", "NED12", "NED13", "NED14", "NED15", "NED16", "NED17", "NED18", "NED19", "NED20", "JPN1", "JPN2", "JPN3", "JPN4", "JPN5", "JPN6", "JPN7", "JPN8", "JPN9", "JPN10", "JPN11", "JPN12", "JPN13", "JPN14", "JPN15", "JPN16", "JPN17", "JPN18", "JPN19", "JPN20", "SWE1", "SWE2", "SWE3", "SWE4", "SWE5", "SWE6", "SWE7", "SWE8", "SWE9", "SWE10", "SWE11", "SWE12", "SWE13", "SWE14", "SWE15", "SWE16", "SWE17", "SWE18", "SWE19", "SWE20", "TUN1", "TUN2", "TUN3", "TUN4", "TUN5", "TUN6", "TUN7", "TUN8", "TUN9", "TUN10", "TUN11", "TUN12", "TUN13", "TUN14", "TUN15", "TUN16", "TUN17", "TUN18", "TUN19", "TUN20", "BRL1", "BRL2", "BRL3", "BRL4", "BRL5", "BRL6", "BRL7", "BRL8", "BRL9", "BRL10", "BRL11", "BRL12", "BRL13", "BRL14", "BRL15", "BRL16", "BRL17", "BRL18", "BRL19", "BRL20", "EGY1", "EGY2", "EGY3", "EGY4", "EGY5", "EGY6", "EGY7", "EGY8", "EGY9", "EGY10", "EGY11", "EGY12", "EGY13", "EGY14", "EGY15", "EGY16", "EGY17", "EGY18", "EGY19", "EGY20", "IRN1", "IRN2", "IRN3", "IRN4", "IRN5", "IRN6", "IRN7", "IRN8", "IRN9", "IRN10", "IRN11", "IRN12", "IRN13", "IRN14", "IRN15", "IRN16", "IRN17", "IRN18", "IRN19", "IRN20", "NZL1", "NZL2", "NZL3", "NZL4", "NZL5", "NZL6", "NZL7", "NZL8", "NZL9", "NZL10", "NZL11", "NZL12", "NZL13", "NZL14", "NZL15", "NZL16", "NZL17", "NZL18", "NZL19", "NZL20", "ESP1", "ESP2", "ESP3", "ESP4", "ESP5", "ESP6", "ESP7", "ESP8", "ESP9", "ESP10", "ESP11", "ESP12", "ESP13", "ESP14", "ESP15", "ESP16", "ESP17", "ESP18", "ESP19", "ESP20", "CPV1", "CPV2", "CPV3", "CPV4", "CPV5", "CPV6", "CPV7", "CPV8", "CPV9", "CPV10", "CPV11", "CPV12", "CPV13", "CPV14", "CPV15", "CPV16", "CPV17", "CPV18", "CPV19", "CPV20", "KSA1", "KSA2", "KSA3", "KSA4", "KSA5", "KSA6", "KSA7", "KSA8", "KSA9", "KSA10", "KSA11", "KSA12", "KSA13", "KSA14", "KSA15", "KSA16", "KSA17", "KSA18", "KSA19", "KSA20", "URU1", "URU2", "URU3", "URU4", "URU5", "URU6", "URU7", "URU8", "URU9", "URU10", "URU11", "URU12", "URU13", "URU14", "URU15", "URU16", "URU17", "URU18", "URU19", "URU20", "FRA1", "FRA2", "FRA3", "FRA4", "FRA5", "FRA6", "FRA7", "FRA8", "FRA9", "FRA10", "FRA11", "FRA12", "FRA13", "FRA14", "FRA15", "FRA16", "FRA17", "FRA18", "FRA19", "FRA20", "SEN1", "SEN2", "SEN3", "SEN4", "SEN5", "SEN6", "SEN7", "SEN8", "SEN9", "SEN10", "SEN11", "SEN12", "SEN13", "SEN14", "SEN15", "SEN16", "SEN17", "SEN18", "SEN19", "SEN20", "IRQ1", "IRQ2", "IRQ3", "IRQ4", "IRQ5", "IRQ6", "IRQ7", "IRQ8", "IRQ9", "IRQ10", "IRQ11", "IRQ12", "IRQ13", "IRQ14", "IRQ15", "IRQ16", "IRQ17", "IRQ18", "IRQ19", "IRQ20", "NOR1", "NOR2", "NOR3", "NOR4", "NOR5", "NOR6", "NOR7", "NOR8", "NOR9", "NOR10", "NOR11", "NOR12", "NOR13", "NOR14", "NOR15", "NOR16", "NOR17", "NOR18", "NOR19", "NOR20", "ARG1", "ARG2", "ARG3", "ARG4", "ARG5", "ARG6", "ARG7", "ARG8", "ARG9", "ARG10", "ARG11", "ARG12", "ARG13", "ARG14", "ARG15", "ARG16", "ARG17", "ARG18", "ARG19", "ARG20", "ALG1", "ALG2", "ALG3", "ALG4", "ALG5", "ALG6", "ALG7", "ALG8", "ALG9", "ALG10", "ALG11", "ALG12", "ALG13", "ALG14", "ALG15", "ALG16", "ALG17", "ALG18", "ALG19", "ALG20", "AUT1", "AUT2", "AUT3", "AUT4", "AUT5", "AUT6", "AUT7", "AUT8", "AUT9", "AUT10", "AUT11", "AUT12", "AUT13", "AUT14", "AUT15", "AUT16", "AUT17", "AUT18", "AUT19", "AUT20", "JOR1", "JOR2", "JOR3", "JOR4", "JOR5", "JOR6", "JOR7", "JOR8", "JOR9", "JOR10", "JOR11", "JOR12", "JOR13", "JOR14", "JOR15", "JOR16", "JOR17", "JOR18", "JOR19", "JOR20", "POR1", "POR2", "POR3", "POR4", "POR5", "POR6", "POR7", "POR8", "POR9", "POR10", "POR11", "POR12", "POR13", "POR14", "POR15", "POR16", "POR17", "POR18", "POR19", "POR20", "COD1", "COD2", "COD3", "COD4", "COD5", "COD6", "COD7", "COD8", "COD9", "COD10", "COD11", "COD12", "COD13", "COD14", "COD15", "COD16", "COD17", "COD18", "COD19", "COD20", "UZB1", "UZB2", "UZB3", "UZB4", "UZB5", "UZB6", "UZB7", "UZB8", "UZB9", "UZB10", "UZB11", "UZB12", "UZB13", "UZB14", "UZB15", "UZB16", "UZB17", "UZB18", "UZB19", "UZB20", "COL1", "COL2", "COL3", "COL4", "COL5", "COL6", "COL7", "COL8", "COL9", "COL10", "COL11", "COL12", "COL13", "COL14", "COL15", "COL16", "COL17", "COL18", "COL19", "COL20", "ENG1", "ENG2", "ENG3", "ENG4", "ENG5", "ENG6", "ENG7", "ENG8", "ENG9", "ENG10", "ENG11", "ENG12", "ENG13", "ENG14", "ENG15", "ENG16", "ENG17", "ENG18", "ENG19", "ENG20", "CRO1", "CRO2", "CRO3", "CRO4", "CRO5", "CRO6", "CRO7", "CRO8", "CRO9", "CRO10", "CRO11", "CRO12", "CRO13", "CRO14", "CRO15", "CRO16", "CRO17", "CRO18", "CRO19", "CRO20", "GHA1", "GHA2", "GHA3", "GHA4", "GHA5", "GHA6", "GHA7", "GHA8", "GHA9", "GHA10", "GHA11", "GHA12", "GHA13", "GHA14", "GHA15", "GHA16", "GHA17", "GHA18", "GHA19", "GHA20", "PAN1", "PAN2", "PAN3", "PAN4", "PAN5", "PAN6", "PAN7", "PAN8", "PAN9", "PAN10", "PAN11", "PAN12", "PAN13", "PAN14", "PAN15", "PAN16", "PAN17", "PAN18", "PAN19", "PAN20", "CC1", "CC2", "CC3", "CC4", "CC5", "CC6", "CC7", "CC8", "CC9", "CC10", "CC11", "CC12", "CC13", "CC14"];
+
+const ALBUMES = [
+  {id:1, nombre:"Mundial FIFA 2026", total:980, colorA:C.blue, colorB:C.blueDark, emoji:"🏆", grupos:GRUPOS_PAISES, todas:TODAS_LAS_FIGUS},
+];
+
+const PUNTOS = [
+  {id:1, nombre:"Librería Papira", direccion:"Tinogasta 3960, Villa Devoto", tipo:"libreria"},
+];
+
+const MSGS_SOBRE = [
+  {id:"hola",    texto:"👋 ¡Hola! Vi que tenemos un match perfecto."},
+  {id:"acepto",  texto:"✅ ¡Acepto el cambio!"},
+  {id:"punto",   texto:"¿En qué punto dejamos los sobres?"},
+  {id:"semana1", texto:"📦 Llevo el sobre esta semana."},
+  {id:"listo",   texto:"✅ ¡Retiré mi sobre! Todo perfecto."},
+  {id:"gracias", texto:"🙏 ¡Gracias! Muy buena onda."},
+];
+const MSGS_DIRECTO = [
+  {id:"hola",   texto:"👋 ¡Hola! Vi que tenemos un match."},
+  {id:"acepto", texto:"✅ ¡Dale, cambiamos!"},
+  {id:"plaza",  texto:"📍 ¿En la plaza del barrio?"},
+  {id:"lunes",  texto:"📅 ¿El lunes te viene?"},
+  {id:"martes", texto:"📅 ¿El martes te viene?"},
+  {id:"manana", texto:"📅 ¿Mañana a la tarde?"},
+  {id:"hecho",  texto:"✅ ¡Hecho! Nos vemos."},
+  {id:"recibi", texto:"🎉 ¡La recibí, gracias!"},
+];
+
+// ─── CSS ──────────────────────────────────────────────────────────────────────
+const css = `
+  @import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;700;800;900&family=Paytone+One&display=swap');
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:${C.bluePale};font-family:'Nunito',sans-serif;color:${C.blueDeep};min-height:100vh;}
+  .shell{max-width:400px;margin:0 auto;min-height:100vh;background:${C.bluePale};position:relative;overflow-x:hidden;}
+  .arg{font-family:'Paytone One',cursive !important;}
+
+  .onboarding{min-height:100vh;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;padding:28px 20px;position:relative;overflow:hidden;
+    background:linear-gradient(160deg,${C.sky} 0%,${C.blue} 45%,${C.blueDark} 100%);}
+  .logo-box{display:flex;flex-direction:column;align-items:center;margin-bottom:22px;
+    animation:popIn .6s cubic-bezier(.34,1.56,.64,1) both;position:relative;z-index:1;}
+  .logo-main{font-family:'Paytone One',cursive;font-size:42px;color:${C.white};
+    text-shadow:3px 3px 0 ${C.blueDark};letter-spacing:-1px;line-height:1;text-align:center;}
+  .logo-sub{font-size:11px;color:${C.gold};font-weight:900;letter-spacing:3px;text-transform:uppercase;}
+
+  .ocard{background:${C.white};border:2px solid ${C.blueDark};border-radius:24px;
+    padding:22px 20px;width:100%;box-shadow:4px 4px 0 ${C.blue};
+    animation:slideUp .5s .15s cubic-bezier(.34,1.56,.64,1) both;position:relative;z-index:1;}
+  .otitle{font-family:'Paytone One',cursive;font-size:20px;color:${C.blueDark};margin-bottom:4px;}
+  .odesc{font-size:13px;color:${C.muted};margin-bottom:14px;line-height:1.5;font-weight:700;}
+  .lbl{font-size:11px;font-weight:900;color:${C.blue};text-transform:uppercase;letter-spacing:1.5px;margin-bottom:5px;}
+  .inp{width:100%;background:${C.bluePale};border:2px solid ${C.blueLight};border-radius:12px;
+    padding:10px 13px;color:${C.blueDeep};font-family:'Nunito',sans-serif;font-size:14px;font-weight:700;
+    outline:none;transition:border-color .2s;margin-bottom:11px;appearance:none;}
+  .inp:focus{border-color:${C.blue};box-shadow:0 0 0 3px ${C.blueLight};}
+  .inp option{background:white;}
+  .btn{width:100%;background:${C.blue};color:white;font-family:'Paytone One',cursive;font-size:16px;
+    border:2px solid ${C.blueDark};border-radius:14px;padding:12px;cursor:pointer;
+    transition:transform .15s,box-shadow .15s;box-shadow:3px 3px 0 ${C.blueDark};}
+  .btn:hover{transform:translate(-2px,-2px);box-shadow:5px 5px 0 ${C.blueDark};}
+  .btn:active{transform:translate(1px,1px);box-shadow:1px 1px 0 ${C.blueDark};}
+  .btn:disabled{opacity:.4;cursor:not-allowed;transform:none;}
+  .btn-gold{background:${C.gold};color:${C.blueDeep};border-color:${C.goldDeep};box-shadow:3px 3px 0 ${C.goldDeep};}
+  .btn-gold:hover{box-shadow:5px 5px 0 ${C.goldDeep};}
+  .btn-green{background:${C.green};color:white;border-color:${C.greenDeep};box-shadow:3px 3px 0 ${C.greenDeep};}
+  .btn2{width:100%;background:${C.bluePale};color:${C.muted};font-family:'Nunito',sans-serif;
+    font-size:13px;font-weight:800;border:2px solid ${C.blueLight};border-radius:14px;padding:10px;
+    cursor:pointer;margin-top:8px;transition:all .15s;}
+  .btn2:hover{border-color:${C.blue};color:${C.blue};}
+  .warn-box{background:#FFF8E1;border:2px solid ${C.gold};border-radius:11px;padding:10px 12px;
+    font-size:12px;color:${C.goldDeep};font-weight:700;line-height:1.5;margin-bottom:11px;display:flex;gap:8px;}
+  .ok-box{background:#E8F5FF;border:2px solid ${C.sky};border-radius:11px;padding:8px 12px;
+    font-size:12px;color:${C.blueDark};font-weight:700;margin-top:8px;display:flex;gap:8px;align-items:flex-start;}
+
+  .bnav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:400px;
+    background:${C.white};border-top:2px solid ${C.blueDark};display:flex;justify-content:space-around;
+    padding:10px 0 18px;z-index:100;box-shadow:0 -3px 12px ${C.sky}66;}
+  .ni{display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;padding:4px 10px;
+    border-radius:12px;border:none;background:none;position:relative;transition:transform .15s;}
+  .ni:hover{transform:translateY(-2px);}
+  .ni-icon{font-size:22px;line-height:1;}
+  .ni-lbl{font-size:9px;font-weight:900;color:${C.muted};text-transform:uppercase;letter-spacing:.5px;}
+  .ni.active .ni-lbl{color:${C.blueDark};}
+  .ni.active .ni-icon{filter:drop-shadow(0 0 5px ${C.sky});}
+  .ndot{position:absolute;top:-2px;right:2px;width:9px;height:9px;background:${C.red};
+    border-radius:50%;border:2px solid white;}
+
+  .screen{padding:20px 16px 100px;}
+  .pheader{margin:-20px -16px 18px;padding:0;position:relative;overflow:hidden;
+    border-bottom:2px solid ${C.blueDark};
+    background:linear-gradient(135deg,${C.sky} 0%,${C.blue} 60%,${C.blueDark} 100%);}
+  .pheader-inner{padding:20px 20px 18px;position:relative;z-index:1;}
+  .stitle{font-family:'Paytone One',cursive;font-size:26px;color:${C.blueDeep};letter-spacing:-.5px;}
+  .stitle-w{color:${C.white};text-shadow:2px 2px 0 ${C.blueDark};}
+  .muted-lbl{font-size:12px;color:rgba(255,255,255,.7);font-weight:800;margin-bottom:2px;}
+  .sectitle{font-size:11px;font-weight:900;color:${C.muted};text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;}
+  .chip{display:inline-flex;align-items:center;gap:5px;background:${C.gold};color:${C.blueDeep};
+    font-weight:900;font-size:11px;padding:4px 11px;border-radius:20px;
+    border:2px solid ${C.goldDeep};box-shadow:2px 2px 0 ${C.goldDeep};}
+  .chip-blue{background:${C.blueDark};color:white;border-color:${C.blueDeep};box-shadow:2px 2px 0 ${C.blueDeep};}
+
+  .acard{border-radius:18px;padding:15px;margin-bottom:11px;cursor:pointer;
+    border:2px solid ${C.blueDark};box-shadow:4px 4px 0 ${C.blueDark};
+    transition:transform .15s,box-shadow .15s;position:relative;overflow:hidden;}
+  .acard:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 ${C.blueDark};}
+  .acard.sel{box-shadow:4px 4px 0 ${C.gold};}
+  .aname{font-family:'Paytone One',cursive;font-size:17px;color:white;text-shadow:1px 1px 0 ${C.blueDark};margin-bottom:4px;}
+  .apbar-wrap{background:rgba(255,255,255,.25);border-radius:8px;height:9px;margin:6px 0;overflow:hidden;}
+  .apbar{height:100%;background:white;border-radius:8px;transition:width .5s ease;}
+  .astats{font-size:12px;color:rgba(255,255,255,.85);font-weight:800;display:flex;justify-content:space-between;}
+
+  .figu-screen{padding:0 0 110px;}
+  .figu-top{background:white;border-bottom:2px solid ${C.blueDark};padding:12px 16px;
+    display:flex;align-items:center;position:sticky;top:0;z-index:10;box-shadow:0 3px 0 ${C.sky};}
+  .figu-tabs{display:flex;margin:11px 16px;border-radius:13px;overflow:hidden;border:2px solid ${C.blueDark};box-shadow:3px 3px 0 ${C.blue};}
+  .figu-tab{flex:1;background:white;border:none;color:${C.muted};font-family:'Nunito',sans-serif;
+    font-size:12px;font-weight:900;padding:10px;cursor:pointer;text-transform:uppercase;transition:all .15s;}
+  .figu-tab.active{background:${C.blue};color:white;}
+  .stats-bar{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin:0 16px 13px;}
+  .stat-box{background:white;border:2px solid ${C.blueDark};border-radius:13px;padding:10px;
+    text-align:center;box-shadow:3px 3px 0 ${C.sky};}
+  .stat-n{font-family:'Paytone One',cursive;font-size:23px;line-height:1;}
+  .stat-l{font-size:9px;font-weight:900;color:${C.muted};text-transform:uppercase;letter-spacing:.5px;margin-top:3px;}
+  .grilla{display:grid;grid-template-columns:repeat(10,1fr);gap:4px;}
+  .figu-cel{aspect-ratio:1;border-radius:7px;display:flex;align-items:center;justify-content:center;
+    font-size:9px;font-weight:900;cursor:pointer;transition:transform .1s;
+    border:1.5px solid ${C.blueLight};user-select:none;}
+  .figu-cel:active{transform:scale(.82);}
+  .figu-cel.none{background:${C.bluePale};color:${C.muted};}
+  .figu-cel.tengo{background:${C.green};color:white;border-color:${C.greenDeep};}
+  .figu-cel.repetida{background:${C.blue};color:white;border-color:${C.blueDark};}
+  .rp-chip{border-radius:8px;padding:4px 10px;font-size:12px;font-weight:900;border:2px solid ${C.blueDark};}
+  .rp-chip.tengo{background:${C.green};color:white;border-color:${C.greenDeep};}
+  .rp-chip.repetida{background:${C.blue};color:white;}
+
+  .mcard{background:white;border:2px solid ${C.blueDark};border-radius:18px;padding:14px;
+    margin-bottom:11px;transition:transform .15s,box-shadow .15s;cursor:pointer;
+    box-shadow:4px 4px 0 ${C.sky};animation:slideUp .4s ease both;}
+  .mcard:hover{transform:translate(-2px,-2px);box-shadow:6px 6px 0 ${C.blue};}
+  .mhead{display:flex;align-items:center;gap:9px;margin-bottom:10px;}
+  .mavatar{font-size:26px;width:44px;height:44px;background:${C.bluePale};border-radius:13px;
+    border:2px solid ${C.blueDark};display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:2px 2px 0 ${C.sky};}
+  .mname{font-family:'Paytone One',cursive;font-size:14px;color:${C.blueDark};}
+  .mbarrio{font-size:11px;color:${C.muted};font-weight:700;}
+  .mbadge{margin-left:auto;background:${C.blue};color:white;font-size:10px;font-weight:900;
+    padding:4px 8px;border-radius:8px;border:2px solid ${C.blueDark};box-shadow:2px 2px 0 ${C.blueDark};flex-shrink:0;}
+  .fchip{border-radius:10px;padding:7px 9px;border:2px solid ${C.blueLight};}
+  .fchip.da{background:${C.green}18;}
+  .fchip.ne{background:${C.blue}18;}
+  .fclbl{font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;}
+  .fchip.da .fclbl{color:${C.greenDeep};}
+  .fchip.ne .fclbl{color:${C.blueDark};}
+  .fcval{font-size:12px;font-weight:800;color:${C.blueDeep};}
+
+  .chat-wrap{padding:0 0 165px;}
+  .ctop{background:linear-gradient(90deg,${C.blue} 0%,${C.blueDark} 100%);
+    border-bottom:2px solid ${C.blueDark};padding:12px 16px;
+    display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:10;}
+  .backbtn{background:rgba(255,255,255,.2);border:1.5px solid rgba(255,255,255,.4);
+    color:white;font-size:18px;cursor:pointer;line-height:1;border-radius:10px;
+    width:34px;height:34px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .csafe{padding:7px 15px;font-size:11px;font-weight:800;text-align:center;line-height:1.4;border-bottom:2px solid;}
+  .cmsgs{padding:13px 15px;display:flex;flex-direction:column;gap:8px;}
+  .bubble{max-width:78%;padding:9px 13px;border-radius:18px;font-size:13px;font-weight:700;line-height:1.4;animation:popIn .3s cubic-bezier(.34,1.56,.64,1) both;}
+  .bubble.mine{background:${C.blue};color:white;align-self:flex-end;border-bottom-right-radius:4px;border:2px solid ${C.blueDark};box-shadow:3px 3px 0 ${C.blueDark};}
+  .bubble.theirs{background:white;color:${C.blueDeep};align-self:flex-start;border-bottom-left-radius:4px;border:2px solid ${C.blueLight};box-shadow:3px 3px 0 ${C.blueLight};}
+  .bwrap{display:flex;flex-direction:column;}
+  .bwrap.mine{align-items:flex-end;}
+  .bwrap.theirs{align-items:flex-start;}
+  .btime{font-size:10px;color:${C.muted};font-weight:700;margin-top:2px;}
+  .cinput{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);width:100%;max-width:400px;
+    background:white;border-top:2px solid ${C.blueDark};padding:9px 12px;z-index:10;box-shadow:0 -3px 0 ${C.sky};}
+  .mopts-lbl{font-size:10px;font-weight:900;color:${C.muted};text-transform:uppercase;letter-spacing:1.5px;margin-bottom:6px;}
+  .mopts{display:flex;flex-wrap:wrap;gap:6px;}
+  .mopt{background:${C.bluePale};border:2px solid ${C.blueLight};color:${C.blueDeep};
+    font-family:'Nunito',sans-serif;font-size:11px;font-weight:800;padding:5px 10px;
+    border-radius:20px;cursor:pointer;transition:all .15s;white-space:nowrap;}
+  .mopt:hover{background:${C.blue};color:white;border-color:${C.blueDark};}
+
+  .modal-sel{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:11px;}
+  .modal-opt{border-radius:14px;padding:12px 9px;text-align:center;cursor:pointer;
+    transition:all .2s;border:2px solid ${C.blueLight};background:${C.bluePale};}
+  .modal-opt:hover:not(.disabled){border-color:${C.blue};}
+  .modal-opt.active{border-color:${C.blueDark};background:${C.blueLight};box-shadow:3px 3px 0 ${C.blue};}
+  .modal-opt.disabled{opacity:.35;cursor:not-allowed;}
+  .modal-icon{font-size:26px;margin-bottom:4px;}
+  .modal-name{font-family:'Paytone One',cursive;font-size:12px;color:${C.blueDark};margin-bottom:2px;}
+  .modal-desc{font-size:10px;color:${C.muted};font-weight:700;line-height:1.4;}
+
+  .ticket{background:white;border-radius:20px;padding:18px;margin:11px 0;color:${C.blueDeep};
+    position:relative;overflow:hidden;border:2px solid ${C.blueDark};box-shadow:5px 5px 0 ${C.blue};}
+  .ticket::before{content:'';position:absolute;top:0;left:0;right:0;height:7px;
+    background:repeating-linear-gradient(90deg,${C.sky} 0,${C.sky} 13px,white 13px,white 17px,${C.blue} 17px,${C.blue} 30px,white 30px,white 34px);}
+  .t-title{font-family:'Paytone One',cursive;font-size:20px;color:${C.blueDark};margin-bottom:2px;padding-top:8px;}
+  .t-sub{font-size:10px;color:${C.muted};font-weight:800;text-transform:uppercase;letter-spacing:1px;margin-bottom:13px;}
+  .t-row{display:flex;justify-content:space-between;align-items:flex-start;padding:8px 0;border-bottom:2px dashed ${C.blueLight};}
+  .t-row:last-of-type{border-bottom:none;}
+  .t-key{font-size:10px;font-weight:900;color:${C.muted};text-transform:uppercase;letter-spacing:1px;padding-top:2px;}
+  .t-val{font-size:13px;font-weight:800;color:${C.blueDeep};text-align:right;max-width:60%;line-height:1.3;}
+  .t-weeks{background:${C.bluePale};border-radius:11px;padding:10px 13px;margin-top:11px;
+    font-size:12px;font-weight:800;color:${C.blueDark};line-height:1.8;text-align:center;border:2px solid ${C.blueLight};}
+
+  .pcard{background:white;border:2px solid ${C.blueLight};border-radius:15px;padding:12px;
+    margin-bottom:9px;display:flex;gap:11px;align-items:center;cursor:pointer;
+    transition:all .15s;box-shadow:3px 3px 0 ${C.blueLight};}
+  .pcard:hover,.pcard.sel{border-color:${C.blue};box-shadow:3px 3px 0 ${C.blue};background:${C.bluePale};}
+  .picon{font-size:20px;width:38px;height:38px;background:${C.bluePale};border-radius:10px;
+    border:2px solid ${C.blueLight};display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .pname{font-weight:900;font-size:13px;color:${C.blueDeep};}
+  .pdir{font-size:11px;color:${C.muted};font-weight:700;}
+  .pbadge{margin-left:auto;flex-shrink:0;background:${C.green};color:white;font-size:10px;
+    font-weight:900;padding:3px 7px;border-radius:7px;border:2px solid ${C.greenDeep};box-shadow:2px 2px 0 ${C.greenDeep};}
+
+  .srow{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:16px;}
+  .sbox{background:white;border:2px solid ${C.blueDark};border-radius:13px;padding:10px;text-align:center;box-shadow:3px 3px 0 ${C.sky};}
+  .snum{font-family:'Paytone One',cursive;font-size:24px;color:${C.blue};line-height:1;}
+  .slbl{font-size:9px;font-weight:900;color:${C.muted};text-transform:uppercase;letter-spacing:.5px;margin-top:3px;}
+  .shield{background:#E8F5FF;border:2px solid ${C.sky};border-radius:15px;padding:12px;margin-bottom:11px;display:flex;gap:9px;}
+  .shtext{font-size:13px;color:${C.blueDark};font-weight:700;line-height:1.5;}
+
+  /* GUÍA DE PUBLICACIÓN */
+  .guide-step{background:white;border:2px solid ${C.blueLight};border-radius:16px;padding:14px;
+    margin-bottom:10px;box-shadow:3px 3px 0 ${C.blueLight};display:flex;gap:12px;align-items:flex-start;}
+  .guide-num{background:${C.blue};color:white;font-family:'Paytone One',cursive;font-size:16px;
+    width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    flex-shrink:0;border:2px solid ${C.blueDark};box-shadow:2px 2px 0 ${C.blueDark};}
+  .guide-title{font-family:'Paytone One',cursive;font-size:14px;color:${C.blueDark};margin-bottom:3px;}
+  .guide-body{font-size:12px;color:${C.muted};font-weight:700;line-height:1.6;}
+  .guide-tag{display:inline-block;background:${C.gold};color:${C.blueDeep};font-size:11px;font-weight:900;
+    padding:3px 9px;border-radius:8px;border:2px solid ${C.goldDeep};margin-top:5px;}
+  .guide-tag.blue{background:${C.blue};color:white;border-color:${C.blueDark};}
+  .guide-tag.green{background:${C.green};color:white;border-color:${C.greenDeep};}
+
+  @keyframes popIn{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:scale(1)}}
+  @keyframes slideUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+
+/* ── ETIQUETA IMPRIMIBLE 10x14cm ──────────────────────────
+   Al imprimir, oculta TODO y muestra solo la etiqueta.
+   Sin colores de fondo, sin sombras. Solo negro sobre blanco.
+   ────────────────────────────────────────────────────────── */
+
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+`;
+
+// ─── ONBOARDING ───────────────────────────────────────────────────────────────
+function OnboardingScreen({ onDone }) {
+  const [step, setStep] = useState(1);
+  const [form, setForm] = useState({apodo:"",edad:"",barrio:"",telefono:"",emailPadre:"",album:null,avatar:AVATARES[0]});
+  const set = (k,v) => setForm(f=>({...f,[k]:v}));
+  const edad = parseInt(form.edad)||0;
+  const menor13 = edad>0&&edad<13, menor18 = edad>0&&edad<18;
+
+  const handleGoogleLogin = async () => {
+    setLoadingGoogle(true);
+    setErrorGoogle("");
+    try {
+      // Redirect — la página se va y vuelve con el resultado
+      await window.fbSignInWithGoogle();
+      // El resultado se maneja en el useEffect de onAuthStateChanged
+    } catch(e) {
+      setErrorGoogle("No se pudo iniciar sesión. Intentá de nuevo.");
+      console.error(e);
+      setLoadingGoogle(false);
+    }
+  };
+
+  if (step===1) return (
+    <div className="onboarding">
+      <StickerBg opacity={0.12}/>
+      <div className="logo-box">
+        <div style={{display:"flex",gap:14,marginBottom:12,alignItems:"flex-end"}}>
+          <div style={{animation:"float 3.5s ease-in-out infinite"}}><S.Capibara size={50}/></div>
+          <div style={{animation:"float 4s ease-in-out infinite .5s"}}><S.Sol size={54}/></div>
+          <div style={{animation:"float 3.2s ease-in-out infinite 1s"}}><S.Pelota size={46}/></div>
+        </div>
+        <div className="logo-main">FiguBarrio</div>
+        <div style={{display:"flex",gap:5,margin:"6px 0"}}><S.Estrella size={20}/><S.Estrella size={20}/><S.Estrella size={20}/></div>
+        <div className="logo-sub">Intercambio entre vecinos · CABA</div>
+      </div>
+      <div className="ocard">
+        <div className="otitle">¡Bienvenido, che! 👋</div>
+        <div className="odesc">Creá tu perfil para intercambiar con vecinos del barrio.</div>
+
+        <div className="lbl">Elegí tu avatar</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}}>
+          {AVATARES.map(av=>(
+            <button key={av} onClick={()=>set("avatar",av)} style={{
+              fontSize:24,width:42,height:42,border:`2px solid ${form.avatar===av?C.blueDark:C.blueLight}`,
+              borderRadius:10,background:form.avatar===av?C.blueLight:C.bluePale,cursor:"pointer",
+              boxShadow:form.avatar===av?`2px 2px 0 ${C.blue}`:"none"}}>
+              <AvatarSticker av={av} size={26}/>
+            </button>
+          ))}
+        </div>
+
+        <div className="lbl">Tu apodo</div>
+        <input className="inp" placeholder="Ej: FiguMaster99" value={form.apodo} onChange={e=>set("apodo",e.target.value)}/>
+        <div className="lbl">¿Cuántos años tenés?</div>
+        <input className="inp" type="number" placeholder="Tu edad" value={form.edad} onChange={e=>set("edad",e.target.value)} min={5} max={99}/>
+        {menor13&&<div className="warn-box"><span>⚠️</span><span>Para menores de 13 necesitamos e-mail de un adulto responsable.</span></div>}
+        <div className="lbl">Tu barrio en CABA</div>
+        <select className="inp" value={form.barrio} onChange={e=>set("barrio",e.target.value)}>
+          <option value="">Seleccioná tu barrio</option>
+          {BARRIOS.map(b=><option key={b}>{b}</option>)}
+        </select>
+        <div className="lbl">Tu teléfono de contacto</div>
+        <input className="inp" type="tel" placeholder="11-XXXX-XXXX" value={form.telefono} onChange={e=>set("telefono",e.target.value)}/>
+        <div style={{fontSize:11,color:C.muted,fontWeight:700,marginTop:-8,marginBottom:11,lineHeight:1.4}}>
+          📦 Solo lo ve el encargado del punto de retiro.
+        </div>
+        {menor13&&(<><div className="lbl">E-mail del adulto responsable</div>
+          <input className="inp" type="email" placeholder="mama@email.com" value={form.emailPadre} onChange={e=>set("emailPadre",e.target.value)}/></>)}
+        <button className="btn" disabled={!form.apodo||!form.edad||!form.barrio||!form.telefono||(menor13&&!form.emailPadre)}
+          onClick={()=>setStep(2)}>Continuar →</button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="onboarding">
+      <StickerBg opacity={0.10}/>
+      <div className="logo-box" style={{marginBottom:18}}>
+        <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
+          <S.Empanada size={42}/>
+          <div className="logo-main" style={{fontSize:24}}>¿Qué álbum?</div>
+          <S.Mate size={40}/>
+        </div>
+        <div style={{display:"flex",gap:5}}><S.Estrella size={18}/><S.Estrella size={18}/><S.Estrella size={18}/></div>
+      </div>
+      <div className="ocard">
+        {ALBUMES.map(a=>(
+          <div key={a.id} className={`acard ${form.album===a.id?"sel":""}`}
+            style={{background:`linear-gradient(135deg,${a.colorA} 0%,${a.colorB} 100%)`}}
+            onClick={()=>set("album",a.id)}>
+            <div style={{display:"flex",alignItems:"center",gap:9}}>
+              <span style={{fontSize:32}}>{a.emoji}</span>
+              <div style={{flex:1}}>
+                <div className="aname">{a.nombre}</div>
+                <div className="apbar-wrap"><div className="apbar" style={{width:form.album===a.id?"35%":"0%"}}/></div>
+                <div className="astats"><span>{a.total} figuritas</span>{form.album===a.id&&<span>✅ Elegido</span>}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+        {menor18&&<div className="ok-box" style={{marginTop:6}}><span>🛡️</span><span>Como sos menor, solo usás <strong>Por Sobre</strong>.</span></div>}
+        <button className="btn" style={{marginTop:12}} disabled={!form.album} onClick={()=>onDone({...form,edad})}>
+          ¡Empezar a intercambiar! 🎉
+        </button>
+        <button className="btn2" onClick={()=>setStep(1)}>← Volver</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── NAV ──────────────────────────────────────────────────────────────────────
+function BottomNav({active, setActive, matchCount}) {
+  const items = [
+    {id:"album",   icon:"📋", label:"Mi Álbum"},
+    {id:"matches", icon:"🔄", label:"Matches", dot:matchCount>0},
+    {id:"puntos",  icon:"📍", label:"Puntos"},
+    {id:"perfil",  icon:"👤", label:"Perfil"},
+  ];
+  return (
+    <nav className="bnav">
+      {items.map(i=>(
+        <button key={i.id} className={`ni ${active===i.id?"active":""}`} onClick={()=>setActive(i.id)}>
+          <span className="ni-icon">{i.icon}</span>
+          {i.dot&&<span className="ndot"/>}
+          <span className="ni-lbl">{i.label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
+
+// ─── HOME ─────────────────────────────────────────────────────────────────────
+function HomeScreen({user, figus, setTab, matchCount}) {
+  const alb = ALBUMES.find(a=>a.id===user.albumId);
+  const tengo = Object.values(figus).filter(v=>v==="tengo").length;
+  const reps  = Object.values(figus).filter(v=>v==="repetida").length;
+  const pct   = Math.round((tengo+reps)/alb.total*100);
+
+  return (
+    <div className="screen">
+      <div className="pheader">
+        <StickerBg opacity={0.13}/>
+        <div className="pheader-inner">
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div>
+              <div className="muted-lbl">Hola, {user.apodo} 👋</div>
+              <div className="stitle stitle-w">Inicio</div>
+              <div style={{marginTop:8,display:"flex",gap:6,alignItems:"center"}}>
+                <div className="chip">📍 {user.barrio}</div>
+                {matchCount>0&&<div className="chip-blue" style={{display:"flex",alignItems:"center",gap:4,padding:"4px 11px",borderRadius:20,border:`2px solid ${C.blueDeep}`,boxShadow:`2px 2px 0 ${C.blueDeep}`,background:C.green,color:"white",fontWeight:900,fontSize:11}}>
+                  🔄 {matchCount} match{matchCount>1?"es":""}
+                </div>}
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:5}}>
+              <div style={{animation:"float 3.5s ease-in-out infinite"}}><S.Sol size={54}/></div>
+              <div style={{display:"flex",gap:3}}><S.Estrella size={13}/><S.Estrella size={13}/><S.Estrella size={13}/></div>
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-around",padding:"0 20px 12px",position:"relative",zIndex:1}}>
+          <S.Mate size={32}/><S.Camiseta size={36}/><S.Pelota size={32}/><S.Empanada size={34}/><S.Bandera size={44}/>
+        </div>
+      </div>
+
+
+
+      {/* Banner días hasta lunes */}
+      {(() => {
+        const dias = diasHastaLunes();
+        if(dias === 0) return (
+          <div style={{background:C.green,border:`2px solid ${C.greenDeep}`,borderRadius:14,
+            padding:12,marginBottom:14,fontSize:13,fontWeight:700,color:"white",
+            display:"flex",gap:8,alignItems:"center",boxShadow:`3px 3px 0 ${C.greenDeep}`}}>
+            <span style={{fontSize:22}}>🎉</span>
+            <span><strong>¡Hoy es lunes!</strong> Se procesaron los matches de la semana. Revisá tus intercambios.</span>
+          </div>
+        );
+        return (
+          <div style={{background:`${C.gold}22`,border:`2px solid ${C.gold}`,borderRadius:14,
+            padding:12,marginBottom:14,fontSize:12,fontWeight:700,color:C.blueDeep,
+            display:"flex",gap:8,alignItems:"center"}}>
+            <span style={{fontSize:20}}>📅</span>
+            <span>Los matches se procesan el <strong>lunes</strong>. Faltan <strong>{dias} día{dias!==1?"s":""}</strong>.</span>
+          </div>
+        );
+      })()}
+      <div className="sectitle">Mi álbum activo</div>
+      <div className="acard sel" style={{background:`linear-gradient(135deg,${alb.colorA} 0%,${alb.colorB} 100%)`}}
+        onClick={()=>setTab("album")}>
+        <div style={{display:"flex",alignItems:"center",gap:9}}>
+          <span style={{fontSize:36,animation:"float 4s ease-in-out infinite"}}>{alb.emoji}</span>
+          <div style={{flex:1}}>
+            <div className="aname">{alb.nombre}</div>
+            <div className="apbar-wrap"><div className="apbar" style={{width:`${pct}%`}}/></div>
+            <div className="astats"><span>{tengo+reps}/{alb.total}</span><span>{pct}% · {reps} para dar</span></div>
+          </div>
+        </div>
+      </div>
+      <button onClick={()=>setTab("album")} style={{
+        width:"100%",background:C.white,border:`2px solid ${C.blueDark}`,borderRadius:14,
+        padding:"11px",fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark,
+        cursor:"pointer",marginBottom:18,boxShadow:`3px 3px 0 ${C.sky}`,transition:"all .15s"}}
+        onMouseOver={e=>{e.currentTarget.style.transform="translate(-2px,-2px)";e.currentTarget.style.boxShadow=`5px 5px 0 ${C.blue}`;}}
+        onMouseOut={e=>{e.currentTarget.style.transform="";e.currentTarget.style.boxShadow=`3px 3px 0 ${C.sky}`;}}>
+        ✏️ Cargar / editar figuritas
+      </button>
+
+      {matchCount>0&&(
+        <button onClick={()=>setTab("matches")} style={{
+          width:"100%",background:C.green,border:`2px solid ${C.greenDeep}`,borderRadius:14,
+          padding:"12px",fontFamily:"'Paytone One',cursive",fontSize:15,color:"white",
+          cursor:"pointer",marginBottom:18,boxShadow:`3px 3px 0 ${C.greenDeep}`,transition:"all .15s",
+          animation:"pulse 2s infinite"}}
+          onMouseOver={e=>{e.currentTarget.style.transform="translate(-2px,-2px)";}}
+          onMouseOut={e=>{e.currentTarget.style.transform="";}}>
+          🔄 Ver {matchCount} match{matchCount>1?"es":""}  que encontramos →
+        </button>
+      )}
+
+      <div style={{display:"flex",justifyContent:"center",gap:16,marginTop:20,opacity:.45}}>
+        <div style={{animation:"float 4s ease-in-out infinite"}}><S.Bandera size={48}/></div>
+        <div style={{animation:"float 3.5s ease-in-out infinite .6s"}}><S.Capibara size={46}/></div>
+        <div style={{animation:"float 4.2s ease-in-out infinite 1.1s"}}><S.Sol size={44}/></div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ÁLBUM ────────────────────────────────────────────────────────────────────
+function AlbumScreen({user, figus, setFigus}) {
+  const alb   = ALBUMES.find(a=>a.id===user.albumId);
+  const grupos = alb.grupos || [];
+  const todas  = alb.todas  || [];
+  const [vista, setVista]       = useState("pais");
+  const [paisSel, setPaisSel]   = useState(null);
+  const [rapida, setRapida]     = useState("");
+  const [rapTipo, setRapTipo]   = useState("tengo");
+  const [guardado, setGuardado] = useState(false);
+  const [busqueda, setBusqueda] = useState("");
+
+  const tengo = Object.values(figus).filter(v=>v==="tengo").length;
+  const reps  = Object.values(figus).filter(v=>v==="repetida").length;
+  const faltan = todas.length - tengo - reps;
+
+  const toggle = cod => {
+    setFigus(prev=>{
+      const cur=prev[cod];
+      if(!cur) return {...prev,[cod]:"tengo"};
+      if(cur==="tengo") return {...prev,[cod]:"repetida"};
+      const next={...prev}; delete next[cod]; return next;
+    });
+  };
+
+  const guardar = () => {
+    DB.saveFigus(user.userId, user.albumId, figus);
+    setGuardado(true);
+    setTimeout(()=>setGuardado(false), 2000);
+  };
+
+  // Entrada rápida — acepta códigos como ARG1 ARG5 o ARG 1 ARG 5
+  const rapCodes = useMemo(()=>{
+    const todasSet = new Set(todas);
+    return rapida.toUpperCase().split(/[\s,;\n]+/)
+      .map(s=>s.trim())
+      .filter(s=>s.length>0 && todasSet.has(s));
+  }, [rapida, todas]);
+
+  const aplicar = () => {
+    setFigus(prev=>{const n={...prev};rapCodes.forEach(c=>{n[c]=rapTipo;});return n;});
+    setRapida("");
+  };
+
+  const gruposFiltrados = busqueda
+    ? grupos.filter(g=>g.nombre.toLowerCase().includes(busqueda.toLowerCase()) || g.cod.toLowerCase().includes(busqueda.toLowerCase()))
+    : grupos;
+
+  return (
+    <div className="figu-screen">
+      <div className="figu-top">
+        <div style={{flex:1}}>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:20,color:C.blueDark}}>📋 Mi Álbum</div>
+          <div style={{fontSize:11,color:C.muted,fontWeight:800}}>{alb.nombre}</div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <button onClick={guardar} style={{
+            background:guardado?C.green:C.blue,color:"white",border:`2px solid ${guardado?C.greenDeep:C.blueDark}`,
+            borderRadius:10,padding:"6px 12px",fontFamily:"'Paytone One',cursive",fontSize:12,
+            cursor:"pointer",boxShadow:`2px 2px 0 ${guardado?C.greenDeep:C.blueDark}`,transition:"all .3s"}}>
+            {guardado?"✅ Guardado!":"💾 Guardar"}
+          </button>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontFamily:"'Paytone One',cursive",fontSize:19,color:C.blue}}>{tengo+reps}</div>
+            <div style={{fontSize:10,color:C.muted,fontWeight:800}}>de {todas.length}</div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{background:`${C.gold}22`,border:`2px solid ${C.gold}`,margin:"10px 16px 0",borderRadius:12,padding:"9px 12px",fontSize:11,fontWeight:700,color:C.blueDeep,lineHeight:1.5}}>
+        💡 <strong>Tocá una figurita para marcarla.</strong> 1× = Tengo · 2× = Me sobra (para dar) · 3× = Borro. Después tocá 💾 Guardar.
+      </div>
+
+      <div className="stats-bar" style={{marginTop:12}}>
+        <div className="stat-box"><div className="stat-n" style={{color:C.green}}>{tengo}</div><div className="stat-l">✅ Tengo</div></div>
+        <div className="stat-box"><div className="stat-n" style={{color:C.blue}}>{reps}</div><div className="stat-l">🔁 Para dar</div></div>
+        <div className="stat-box"><div className="stat-n" style={{color:C.muted}}>{faltan}</div><div className="stat-l">❌ Faltan</div></div>
+      </div>
+
+      <div style={{margin:"0 16px 12px"}}>
+        <div style={{background:C.bluePale,borderRadius:10,height:10,overflow:"hidden",display:"flex",border:`2px solid ${C.blueLight}`}}>
+          <div style={{width:`${(tengo/todas.length*100).toFixed(1)}%`,background:C.green,transition:"width .4s"}}/>
+          <div style={{width:`${(reps/todas.length*100).toFixed(1)}%`,background:C.blue,transition:"width .4s"}}/>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.muted,fontWeight:800,marginTop:4}}>
+          <span style={{color:C.green}}>■ Tengo</span>
+          <span style={{color:C.blue}}>■ Para dar</span>
+          <span>□ Faltan</span>
+        </div>
+      </div>
+
+      <div className="figu-tabs">
+        <button className={`figu-tab ${vista==="pais"?"active":""}`} onClick={()=>{setVista("pais");setPaisSel(null);}}>🌍 Por país</button>
+        <button className={`figu-tab ${vista==="rapida"?"active":""}`} onClick={()=>setVista("rapida")}>⚡ Entrada rápida</button>
+      </div>
+
+      {vista==="pais" && !paisSel && (
+        <div style={{padding:"0 16px"}}>
+          {/* Buscador de país */}
+          <input
+            style={{width:"100%",background:C.bluePale,border:`2px solid ${C.blueLight}`,borderRadius:12,
+              padding:"10px 14px",color:C.blueDeep,fontFamily:"'Nunito',sans-serif",fontSize:14,fontWeight:700,
+              outline:"none",marginBottom:12}}
+            placeholder="🔍 Buscar país..."
+            value={busqueda} onChange={e=>setBusqueda(e.target.value)}
+          />
+          {/* Lista de países */}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {gruposFiltrados.map((g,gi)=>{
+              const tten = g.figus.filter(f=>figus[f]==="tengo").length;
+              const trep = g.figus.filter(f=>figus[f]==="repetida").length;
+              const total_g = g.figus.length;
+              const pct = Math.round((tten+trep)/total_g*100);
+              return (
+                <div key={g.cod+"_"+gi} onClick={()=>setPaisSel(g)}
+                  style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+                    padding:"12px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:12,
+                    boxShadow:`3px 3px 0 ${C.blueLight}`,transition:"all .15s"}}
+                  onMouseOver={e=>{e.currentTarget.style.borderColor=C.blue;e.currentTarget.style.boxShadow=`3px 3px 0 ${C.blue}`;}}
+                  onMouseOut={e=>{e.currentTarget.style.borderColor=C.blueLight;e.currentTarget.style.boxShadow=`3px 3px 0 ${C.blueLight}`;}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontFamily:"'Paytone One',cursive",fontSize:13,color:C.blueDark,marginBottom:4}}>{g.nombre}</div>
+                    <div style={{background:C.bluePale,borderRadius:6,height:6,overflow:"hidden",display:"flex"}}>
+                      <div style={{width:`${(tten/total_g*100).toFixed(1)}%`,background:C.green}}/>
+                      <div style={{width:`${(trep/total_g*100).toFixed(1)}%`,background:C.blue}}/>
+                    </div>
+                  </div>
+                  <div style={{textAlign:"right",flexShrink:0}}>
+                    <div style={{fontFamily:"'Paytone One',cursive",fontSize:16,color:pct===100?C.green:C.blue}}>{tten+trep}/{total_g}</div>
+                    {trep>0&&<div style={{fontSize:10,color:C.accent,fontWeight:900}}>{trep} para dar</div>}
+                  </div>
+                  <div style={{color:C.muted,fontSize:18}}>›</div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{height:16}}/>
+        </div>
+      )}
+
+      {vista==="pais" && paisSel && (
+        <div style={{padding:"0 16px"}}>
+          <button onClick={()=>setPaisSel(null)} style={{
+            background:C.bluePale,border:`2px solid ${C.blueLight}`,borderRadius:10,
+            padding:"7px 14px",fontFamily:"'Paytone One',cursive",fontSize:13,color:C.blueDark,
+            cursor:"pointer",marginBottom:12,display:"flex",alignItems:"center",gap:6}}>
+            ← {paisSel.nombre}
+          </button>
+          <div style={{fontSize:11,color:C.muted,fontWeight:700,marginBottom:8}}>
+            1× = Tengo · 2× = Me sobra · 3× = Borro
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:16}}>
+            {paisSel.figus.map(cod=>{
+              const estado = figus[cod];
+              return (
+                <div key={cod} onClick={()=>toggle(cod)}
+                  style={{
+                    padding:"6px 10px",borderRadius:8,fontSize:12,fontWeight:900,cursor:"pointer",
+                    userSelect:"none",transition:"transform .1s",border:"2px solid",
+                    background: estado==="tengo"?C.green : estado==="repetida"?C.blue : C.bluePale,
+                    borderColor: estado==="tengo"?C.greenDeep : estado==="repetida"?C.blueDark : C.blueLight,
+                    color: estado?"white":C.muted,
+                  }}>
+                  {cod}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {vista==="rapida" && (
+        <div style={{padding:"0 16px"}}>
+          <div style={{fontSize:13,color:C.muted,fontWeight:700,lineHeight:1.6,marginBottom:11}}>
+            Escribí los códigos separados por espacio, coma o enter.<br/>
+            <strong>Ejemplo:</strong> ARG1 ARG5 ARG10 BRA3 ESP7
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:11}}>
+            {[["tengo","✅ Las tengo"],["repetida","🔁 Para dar"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setRapTipo(k)} style={{
+                flex:1,background:rapTipo===k?(k==="tengo"?C.green:C.blue):C.white,
+                border:`2px solid ${rapTipo===k?(k==="tengo"?C.greenDeep:C.blueDark):C.blueLight}`,
+                color:rapTipo===k?"white":C.muted,fontFamily:"'Nunito',sans-serif",
+                fontSize:13,fontWeight:900,padding:"9px",borderRadius:12,cursor:"pointer"}}>{l}</button>
+            ))}
+          </div>
+          <textarea style={{width:"100%",background:C.bluePale,border:`2px solid ${C.blueLight}`,borderRadius:12,
+            padding:"12px 14px",color:C.blueDeep,fontFamily:"'Nunito',sans-serif",fontSize:14,fontWeight:700,
+            outline:"none",resize:"vertical",minHeight:"90px",textTransform:"uppercase"}}
+            placeholder={"ARG1 ARG5 ARG10\nBRA3 BRA7\nESP1"} value={rapida} onChange={e=>setRapida(e.target.value)}/>
+          <div style={{fontSize:11,color:C.muted,fontWeight:700,margin:"5px 0 11px",lineHeight:1.5}}>
+            {rapCodes.length>0
+              ? `✅ ${rapCodes.length} código${rapCodes.length>1?"s":""} reconocido${rapCodes.length>1?"s":""}: ${rapCodes.slice(0,6).join(", ")}${rapCodes.length>6?"…":""}`
+              : "Escribí los códigos del álbum (ej: ARG1, BRA5, ESP10)"}
+          </div>
+          {rapCodes.length>0&&(
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:11}}>
+              {rapCodes.slice(0,15).map(c=><div key={c} className={`rp-chip ${rapTipo}`}>{c}</div>)}
+              {rapCodes.length>15&&<div className="rp-chip tengo">+{rapCodes.length-15} más</div>}
+            </div>
+          )}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>
+            <button className="btn btn-green" style={{padding:11,fontSize:13}} disabled={rapCodes.length===0} onClick={aplicar}>✅ Confirmar ({rapCodes.length})</button>
+            <button className="btn" style={{background:C.red,borderColor:"#B01020",boxShadow:`3px 3px 0 #B01020`,padding:11,fontSize:13}} onClick={()=>setRapida("")}>🗑️ Limpiar</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+// ═══════════════════════════════════════════════════════════
+//  PANTALLA DEL SOBRE — imagen imprimible
+// ═══════════════════════════════════════════════════════════
+function SobreScreen({ sobre, user, onBack, onConfirmar, onAnular }) {
+  const [mostrarAdvertencia, setMostrarAdvertencia] = useState(!sobre.advertenciaVista);
+  const [calificando, setCalificando] = useState(false);
+  const [estrellas, setEstrellas] = useState(5);
+  const [comentario, setComentario] = useState("");
+
+  const soyA = sobre.userA === user.userId;
+  const misFigus = soyA ? sobre.figusDe : sobre.figusParA;
+  const susFigus = soyA ? sobre.figusParA : sobre.figusDe;
+  const otroApodo = soyA ? sobre.apodoB : sobre.apodoA;
+  const otroCel = soyA ? sobre.celB : sobre.celA;
+  const miCel = user.telefono;
+  const miApodo = user.apodo;
+  const yaConfirme = soyA ? sobre.confirmadoA : sobre.confirmadoB;
+  const diasRestantes = sobre.createdAt
+    ? Math.max(0, 15 - Math.floor((Date.now() - sobre.createdAt) / 86400000))
+    : 15;
+
+  if (mostrarAdvertencia) return (
+    <div className="screen">
+      <div style={{background:"white",border:`2px solid ${C.gold}`,borderRadius:20,padding:24,
+        boxShadow:`5px 5px 0 ${C.gold}`}}>
+        <div style={{fontFamily:"'Paytone One',cursive",fontSize:20,color:C.gold,marginBottom:16,
+          display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontSize:32}}>⚠️</span> Importante
+        </div>
+        {[
+          "Tenés hasta el domingo para dejar tu sobre en el punto acordado.",
+          "Si no retirás el sobre del otro, es tu responsabilidad. Esa figurita se considera perdida.",
+          "Si el otro no retira lo tuyo, podés pasar a buscarlo cuando quieras. Te recomendamos que sea a la brevedad.",
+          "El código se anula automáticamente a los 15 días sin confirmar.",
+        ].map((txt,i) => (
+          <div key={i} style={{display:"flex",gap:10,marginBottom:12,fontSize:13,fontWeight:700,
+            color:C.blueDeep,lineHeight:1.6}}>
+            <span style={{color:C.gold,flexShrink:0}}>•</span>
+            <span>{txt}</span>
+          </div>
+        ))}
+        <button className="btn btn-gold" style={{marginTop:8}}
+          onClick={() => setMostrarAdvertencia(false)}>
+          ✅ Entendido, ver el sobre
+        </button>
+      </div>
+    </div>
+  );
+
+  if (calificando) return (
+    <div className="screen">
+      <div style={{fontFamily:"'Paytone One',cursive",fontSize:22,color:C.blueDark,marginBottom:6}}>
+        ⭐ Calificar a {otroApodo}
+      </div>
+      <div style={{fontSize:13,color:C.muted,fontWeight:700,marginBottom:20}}>
+        ¿Cómo fue el intercambio?
+      </div>
+      {/* Estrellas */}
+      <div style={{display:"flex",gap:8,justifyContent:"center",marginBottom:20}}>
+        {[1,2,3,4,5].map(n => (
+          <button key={n} onClick={() => setEstrellas(n)} style={{
+            fontSize:36,background:"none",border:"none",cursor:"pointer",
+            opacity: n <= estrellas ? 1 : 0.3, transition:"opacity .15s"}}>
+            ⭐
+          </button>
+        ))}
+      </div>
+      <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark,marginBottom:8}}>
+        Comentario (opcional)
+      </div>
+      <textarea style={{width:"100%",background:C.bluePale,border:`2px solid ${C.blueLight}`,
+        borderRadius:12,padding:"12px 14px",color:C.blueDeep,fontFamily:"'Nunito',sans-serif",
+        fontSize:14,fontWeight:700,outline:"none",resize:"vertical",minHeight:80,marginBottom:16}}
+        placeholder="Ej: Muy puntual, dejó el sobre al día siguiente..."
+        value={comentario} onChange={e => setComentario(e.target.value)}
+      />
+      <button className="btn btn-green" onClick={() => {
+        DBRep.addResena(soyA ? sobre.userB : sobre.userA, estrellas, comentario, user.apodo);
+        onConfirmar(sobre.codigo);
+      }}>
+        ✅ Enviar calificación
+      </button>
+      <button className="btn2" onClick={() => {
+        onConfirmar(sobre.codigo);
+      }}>
+        Omitir calificación
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="screen">
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <button onClick={onBack} style={{background:C.bluePale,border:`2px solid ${C.blueDark}`,
+          color:C.blueDark,cursor:"pointer",fontSize:17,borderRadius:10,width:34,height:34,
+          display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`2px 2px 0 ${C.blue}`}}>←</button>
+        <div style={{fontFamily:"'Paytone One',cursive",fontSize:20,color:C.blueDark}}>📦 Tu Sobre</div>
+        <div style={{fontSize:11,color:sobre.estado==="completado"?C.green:sobre.estado==="anulado"?C.red:C.gold,
+          fontWeight:900,border:`2px solid`,borderRadius:8,padding:"3px 8px",
+          borderColor:sobre.estado==="completado"?C.green:sobre.estado==="anulado"?C.red:C.gold}}>
+          {sobre.estado==="completado"?"✅ COMPLETADO":sobre.estado==="anulado"?"❌ ANULADO":"⏳ PENDIENTE"}
+        </div>
+      </div>
+
+      {/* SOBRE IMPRIMIBLE */}
+      <div id="sobre-print" style={{background:"white",border:`3px solid ${C.blueDark}`,borderRadius:16,
+        padding:20,marginBottom:16,boxShadow:`4px 4px 0 ${C.blue}`,position:"relative",overflow:"hidden"}}>
+        {/* Borde superior decorativo */}
+        <div style={{position:"absolute",top:0,left:0,right:0,height:8,
+          background:`repeating-linear-gradient(90deg,${C.sky} 0,${C.sky} 14px,white 14px,white 18px,${C.blue} 18px,${C.blue} 32px,white 32px,white 36px)`}}/>
+
+        {/* Header */}
+        <div style={{display:"flex",alignItems:"center",gap:10,paddingTop:10,marginBottom:4}}>
+          <S.Sol size={28}/>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:20,color:C.blueDark}}>FiguBarrio</div>
+          <div style={{marginLeft:"auto"}}><S.Bandera size={40}/></div>
+        </div>
+        <div style={{fontSize:10,color:C.muted,fontWeight:800,textTransform:"uppercase",
+          letterSpacing:1,marginBottom:14}}>
+          Mundial FIFA 2026 · Sobre de intercambio
+        </div>
+
+        {/* Código */}
+        <div style={{background:C.bluePale,border:`2px solid ${C.blueDark}`,borderRadius:10,
+          padding:"8px 14px",marginBottom:14,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:9,color:C.muted,fontWeight:900,textTransform:"uppercase",letterSpacing:1}}>Código</div>
+            <div style={{fontFamily:"'Paytone One',cursive",fontSize:22,color:C.blueDark,letterSpacing:2}}>
+              {sobre.codigo}
+            </div>
+          </div>
+          <div style={{fontSize:9,color:C.muted,fontWeight:700,textAlign:"right"}}>
+            Semana {sobre.semana}<br/>
+            Vence en {diasRestantes} días
+          </div>
+        </div>
+
+        {/* DE */}
+        <div style={{background:`${C.blue}11`,border:`2px solid ${C.blueLight}`,borderRadius:10,
+          padding:"10px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,color:C.blue,fontWeight:900,textTransform:"uppercase",
+            letterSpacing:1.5,marginBottom:6}}>📤 DE</div>
+          <div style={{fontWeight:900,fontSize:14,color:C.blueDeep,marginBottom:2}}>
+            Usuario: {miApodo}
+          </div>
+          <div style={{fontSize:12,fontWeight:700,color:C.muted}}>
+            Cel: +54 9 11 {miCel}
+          </div>
+        </div>
+
+        {/* PARA */}
+        <div style={{background:`${C.green}15`,border:`2px solid ${C.green}`,borderRadius:10,
+          padding:"10px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,color:C.greenDeep,fontWeight:900,textTransform:"uppercase",
+            letterSpacing:1.5,marginBottom:6}}>📥 PARA</div>
+          <div style={{fontWeight:900,fontSize:14,color:C.blueDeep,marginBottom:2}}>
+            Usuario: {otroApodo}
+          </div>
+          <div style={{fontSize:12,fontWeight:700,color:C.muted}}>
+            Cel: +54 9 11 {otroCel}
+          </div>
+        </div>
+
+        {/* FIGURITAS */}
+        <div style={{border:`2px solid ${C.blueLight}`,borderRadius:10,padding:"10px 14px",marginBottom:10}}>
+          <div style={{fontSize:9,color:C.muted,fontWeight:900,textTransform:"uppercase",
+            letterSpacing:1.5,marginBottom:6}}>🃏 FIGURITAS ADENTRO</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+            {misFigus.map(f => (
+              <div key={f} style={{background:C.bluePale,border:`2px solid ${C.blueDark}`,
+                borderRadius:6,padding:"3px 8px",fontSize:12,fontWeight:900,color:C.blueDark}}>
+                {f}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* PUNTO */}
+        <div style={{fontSize:11,fontWeight:700,color:C.muted,textAlign:"center",paddingTop:4}}>
+          📍 {sobre.punto || "Punto acordado por chat"}
+        </div>
+      </div>
+
+      {/* FIGURITAS QUE VAS A RECIBIR */}
+      <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+        padding:14,marginBottom:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+        <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark,marginBottom:8}}>
+          🎁 Vas a recibir de {otroApodo}
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+          {susFigus.map(f => (
+            <div key={f} style={{background:C.green,border:`2px solid ${C.greenDeep}`,
+              borderRadius:6,padding:"3px 8px",fontSize:12,fontWeight:900,color:"white"}}>
+              {f}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* BOTONES DE ACCIÓN */}
+      {sobre.estado === "pendiente" && !yaConfirme && (
+        <>
+          <button className="btn btn-green" style={{marginBottom:10}}
+            onClick={async () => {
+              // Marcar confirmación en Firebase
+              if(window.fbDB && sobre.codigo) {
+                const s = getChatState ? getChatState() : {};
+                const soyA_conf = sobre.userA === user.userId;
+                if(soyA_conf) s.confirmadoA = true; else s.confirmadoB = true;
+                if(s.confirmadoA && s.confirmadoB) s.estado = "completado";
+                await saveChatState(s);
+              }
+              setCalificando(true);
+            }}>
+            ✅ Confirmé que recibí el sobre
+          </button>
+          <button className="btn2" style={{color:C.red,borderColor:C.red}}
+            onClick={async () => {
+              // Anular en Firebase
+              if(window.fbDB && sobre.codigo) {
+                const s = getChatState ? getChatState() : {};
+                s.estado = "anulado";
+                s.motivoAnulacion = "retiro_propio";
+                await saveChatState(s);
+              }
+              onAnular(sobre.codigo, "retiro_propio");
+            }}>
+            ↩️ No pude, quiero retirar lo que dejé
+          </button>
+        </>
+      )}
+      {yaConfirme && sobre.estado !== "completado" && (
+        <div style={{background:"#E8F5FF",border:`2px solid ${C.sky}`,borderRadius:12,
+          padding:12,fontSize:13,fontWeight:700,color:C.blueDark,textAlign:"center"}}>
+          ✅ Ya confirmaste tu parte. Esperando que {otroApodo} confirme también.
+        </div>
+      )}
+      {sobre.estado === "completado" && (
+        <div style={{background:"#E8F8EE",border:`2px solid ${C.green}`,borderRadius:12,
+          padding:12,fontSize:13,fontWeight:700,color:C.greenDeep,textAlign:"center"}}>
+          🎉 ¡Intercambio completado! Los dos confirmaron.
+        </div>
+      )}
+      {sobre.estado === "anulado" && (
+        <div style={{background:"#FFF0F0",border:`2px solid ${C.red}`,borderRadius:12,
+          padding:12,fontSize:13,fontWeight:700,color:C.red,textAlign:"center"}}>
+          ❌ Este intercambio fue anulado.
+        </div>
+      )}
+
+      <button className="btn" style={{marginTop:10}} onClick={() => window.print()}>
+        🖨️ Imprimir sobre
+      </button>
+    </div>
+  );
+}
+
+// ─── MATCHES ──────────────────────────────────────────────────────────────────
+function MatchesScreen({user, figus, onOpenChat, onVerSobre}) {
+  const [matches, setMatches] = useState([]);
+  const [cargando, setCargando] = useState(true);
+  const [matchActivo, setMatchActivo] = useState(null);
+
+  useEffect(()=>{
+    const buscarMatches = async () => {
+      // Primero verificar si hay un match activo (aceptado pero no completado)
+      // Buscar en Firebase si hay un chat activo con este usuario
+      if(window.fbDB) {
+        try {
+          const snap = await window.fbGetDocs(window.fbCollection(window.fbDB, "chats"));
+          snap.forEach(d => {
+            const data = d.data();
+            const claveChat = d.id;
+            // Ver si este chat me involucra y está activo
+            if(claveChat.includes(user.userId)) {
+              const estaActivo = (data.estadoA === "aceptado" || data.estadoB === "aceptado") 
+                && data.estado !== "completado" 
+                && data.estado !== "anulado";
+              if(estaActivo) {
+                // Guardar en localStorage para que el chat lo encuentre
+                localStorage.setItem(claveChat, JSON.stringify(data));
+                setMatchActivo({claveChat, ...data});
+              }
+            }
+          });
+        } catch(e) { console.error("buscar chat activo error:", e); }
+      }
+
+      // Sincronizar desde Firebase antes de calcular matches
+      await DB.syncUsuarios();
+      await DB.syncFiguritas();
+      // Buscar nuevos matches con datos frescos
+      const todos = DB.getAllUsers();
+      const miFigusFrescas = DB.getFigus(user.userId, user.albumId);
+      const result = calcularMatches(user.userId, user.albumId, miFigusFrescas, todos);
+      setMatches(result);
+      setCargando(false);
+    };
+    buscarMatches();
+  }, [user.userId, user.albumId, figus]);
+
+  // Si hay match activo → mostrar SOLO eso, bloquear nuevos matches
+  if(matchActivo) return (
+    <div className="screen">
+      <div className="pheader">
+        <StickerBg opacity={0.12}/>
+        <div className="pheader-inner">
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div>
+              <div className="stitle stitle-w">📦 Intercambio activo</div>
+              <div style={{marginTop:6}}><div className="chip">En curso</div></div>
+            </div>
+            <div style={{animation:"float 3s ease-in-out infinite"}}><S.Pelota size={48}/></div>
+          </div>
+        </div>
+      </div>
+      <div style={{background:`${C.gold}22`,border:`2px solid ${C.gold}`,borderRadius:14,
+        padding:12,marginBottom:14,fontSize:12,fontWeight:700,color:C.blueDeep,lineHeight:1.6}}>
+        ⚠️ Tenés un intercambio en curso. Completalo o cancelalo antes de buscar nuevos matches.
+      </div>
+      <div style={{background:"white",border:`2px solid ${C.green}`,borderRadius:16,
+        padding:16,boxShadow:`4px 4px 0 ${C.green}`,cursor:"pointer"}}
+        onClick={()=>{
+          const soyA = matchActivo.userA === user.userId;
+          const otroUserId = soyA ? matchActivo.userB : matchActivo.userA;
+          const otroApodo  = soyA ? matchActivo.apodoB : matchActivo.apodoA;
+          // Pasar las figuritas correctas según quién soy
+          const yoLeDoy = soyA ? (matchActivo.figusDe || []) : (matchActivo.figusParA || []);
+          const elMeDa  = soyA ? (matchActivo.figusParA || []) : (matchActivo.figusDe || []);
+          onOpenChat({
+            userId: otroUserId,
+            apodo: otroApodo,
+            barrio: "",
+            edad: 99,
+            esAdulto: true,
+            avatar: "sol",
+            yoLeDoy,
+            elMeDa,
+          });
+        }}>
+        <div style={{fontFamily:"'Paytone One',cursive",fontSize:16,color:C.greenDeep,marginBottom:10}}>
+          📦 Tu intercambio pendiente
+        </div>
+        <div style={{fontSize:13,fontWeight:700,color:C.blueDeep,lineHeight:1.8,marginBottom:12}}>
+          {matchActivo.estadoA==="aceptado"&&matchActivo.estadoB==="aceptado"
+            ? <span>✅ <strong>¡Ambos aceptaron!</strong> Ya podés ver el sobre.</span>
+            : <span>⏳ Esperando que el otro acepte...</span>}
+          {matchActivo.codigo&&<div>Código: <strong style={{fontFamily:"monospace"}}>{matchActivo.codigo}</strong></div>}
+          <div>📍 Librería Papira · Tinogasta 3960</div>
+        </div>
+        <div style={{background:C.green,color:"white",border:`2px solid ${C.greenDeep}`,
+          borderRadius:10,padding:"10px",fontFamily:"'Paytone One',cursive",fontSize:14,
+          textAlign:"center",boxShadow:`2px 2px 0 ${C.greenDeep}`}}>
+          Ver intercambio →
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="screen">
+      <div className="pheader">
+        <StickerBg opacity={0.12}/>
+        <div className="pheader-inner">
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div>
+              <div className="stitle stitle-w">🔄 Matches</div>
+              <div style={{marginTop:6}}>
+                <div className="chip">{cargando?"Buscando...": `${matches.length} encontrado${matches.length!==1?"s":""}`}</div>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"center"}}>
+              <S.Pelota size={48}/><S.Bandera size={46}/>
+            </div>
+          </div>
+        </div>
+      </div>
+
+
+
+      {cargando ? (
+        <div style={{textAlign:"center",padding:"40px 0",color:C.muted,fontSize:13,fontWeight:700}}>
+          <div style={{fontSize:48,marginBottom:12,animation:"float 1s ease-in-out infinite"}}><S.Sol size={60}/></div>
+          Buscando matches en tu barrio...
+        </div>
+      ) : matches.length === 0 ? (
+        <div style={{textAlign:"center",padding:"40px 16px",color:C.muted}}>
+          <div style={{marginBottom:12}}><S.Capibara size={64}/></div>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:16,color:C.blueDark,marginBottom:8}}>
+            Todavía no hay matches
+          </div>
+          <div style={{fontSize:13,fontWeight:700,lineHeight:1.6}}>
+            Asegurate de haber guardado tus figuritas (💾) y de que haya otros usuarios registrados con figuritas cargadas.
+          </div>
+
+        </div>
+      ) : (
+        <>
+          {/* MATCH ACTIVO — si hay uno en curso, mostrarlo primero */}
+      {matchActivo && (
+        <div style={{background:`${C.green}18`,border:`2px solid ${C.green}`,borderRadius:14,
+          padding:14,marginBottom:14,boxShadow:`3px 3px 0 ${C.green}`,cursor:"pointer"}}
+          onClick={()=>{
+            // Encontrar el match correspondiente y abrir el chat
+            const otroUserId = matchActivo.userA === user.userId ? matchActivo.userB : matchActivo.userA;
+            const otroApodo  = matchActivo.userA === user.userId ? matchActivo.apodoB : matchActivo.apodoA;
+            const otroBarrio = "";
+            const otroEdad   = 99;
+            onOpenChat({
+              userId: otroUserId,
+              apodo: otroApodo,
+              barrio: otroBarrio,
+              edad: otroEdad,
+              esAdulto: true,
+              avatar: "sol",
+              yoLeDoy: matchActivo.figusDe || [],
+              elMeDa: matchActivo.figusParA || [],
+            });
+          }}>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:15,color:C.greenDeep,marginBottom:6}}>
+            📦 Tenés un intercambio en curso
+          </div>
+          <div style={{fontSize:13,fontWeight:700,color:C.blueDeep,lineHeight:1.6}}>
+            Código: <strong>{matchActivo.codigo || "pendiente"}</strong><br/>
+            Estado: {matchActivo.estadoA==="aceptado"&&matchActivo.estadoB==="aceptado"
+              ? "✅ Ambos aceptaron — ver el sobre"
+              : "⏳ Esperando confirmación"}
+          </div>
+          <div style={{marginTop:10,background:C.green,color:"white",
+            border:`2px solid ${C.greenDeep}`,borderRadius:10,padding:"8px 14px",
+            fontFamily:"'Paytone One',cursive",fontSize:13,textAlign:"center",
+            boxShadow:`2px 2px 0 ${C.greenDeep}`}}>
+            Ver intercambio →
+          </div>
+        </div>
+      )}
+
+      {/* Notificaciones de chats donde el otro ya aceptó */}
+          {matches.map(m => {
+            const claveChat = ["fb_chat", user.userId, m.userId].sort().join("_");
+            try {
+              const d = localStorage.getItem(claveChat);
+              if(!d) return null;
+              const s = JSON.parse(d);
+              const soyA = user.userId < m.userId;
+              const miEstado = soyA ? s.estadoA : s.estadoB;
+              const otroEstado = soyA ? s.estadoB : s.estadoA;
+              if(otroEstado === "aceptado" && miEstado === "pendiente") {
+                return (
+                  <div key={"notif_"+m.userId} style={{background:`${C.green}22`,border:`2px solid ${C.green}`,
+                    borderRadius:14,padding:12,marginBottom:10,fontSize:13,fontWeight:700,
+                    color:C.greenDeep,display:"flex",gap:8,alignItems:"center",
+                    boxShadow:`3px 3px 0 ${C.green}`,cursor:"pointer"}}
+                    onClick={()=>onOpenChat(m)}>
+                    <span style={{fontSize:24}}>⚡</span>
+                    <span><strong>{m.apodo}</strong> aceptó el intercambio. ¡Aceptá vos también!</span>
+                  </div>
+                );
+              }
+            } catch(e) {}
+            return null;
+          })}
+          <div style={{background:C.blueLight,border:`2px solid ${C.sky}`,borderRadius:14,padding:11,fontSize:13,fontWeight:700,color:C.blueDark,marginBottom:14,display:"flex",gap:8}}>
+            <span>🎉</span><span>¡Encontramos vecinos con quienes podés intercambiar!</span>
+          </div>
+          {matches.map((m,i)=>{
+            const puedeDirecto = user.edad>=18 && m.esAdulto;
+            return (
+              <div key={m.userId} className="mcard" style={{animationDelay:`${i*.1}s`}} onClick={()=>onOpenChat(m)}>
+                <div className="mhead">
+                  <div className="mavatar"><AvatarSticker av={m.avatar} size={28}/></div>
+                  <div>
+                    <div className="mname">{m.apodo}</div>
+                    <div className="mbarrio">📍 {m.barrio} · {m.esAdulto?"🧑 Adulto":"🧒 Joven"}</div>
+                    {(() => {
+                      const rep = DBRep.get(m.userId);
+                      return (
+                        <div style={{fontSize:10,fontWeight:800,color:rep.puntos<3?C.red:C.gold}}>
+                          {"⭐".repeat(Math.round(rep.puntos))} {rep.puntos.toFixed(1)} ({rep.total} cambios)
+                          {rep.puntos < 3 && <span style={{color:C.red}}> ⚠️ Reputación baja</span>}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="mbadge">MATCH ✨</div>
+                </div>
+                {/* Figuritas reales del match */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+                  <div className="fchip da">
+                    <div className="fclbl">Él/ella te da ({m.elMeDa.length})</div>
+                    <div className="fcval">#{m.elMeDa.slice(0,3).join(", #")}{m.elMeDa.length>3?`…+${m.elMeDa.length-3}`:""}</div>
+                  </div>
+                  <div className="fchip ne">
+                    <div className="fclbl">Vos le das ({m.yoLeDoy.length})</div>
+                    <div className="fcval">#{m.yoLeDoy.slice(0,3).join(", #")}{m.yoLeDoy.length>3?`…+${m.yoLeDoy.length-3}`:""}</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                  <div style={{background:C.green,color:"white",fontSize:10,fontWeight:900,padding:"3px 8px",borderRadius:6,border:`2px solid ${C.greenDeep}`,boxShadow:`2px 2px 0 ${C.greenDeep}`}}>📦 Por Sobre</div>
+                  {puedeDirecto&&<div style={{background:C.gold,color:C.blueDeep,fontSize:10,fontWeight:900,padding:"3px 8px",borderRadius:6,border:`2px solid ${C.goldDeep}`,boxShadow:`2px 2px 0 ${C.goldDeep}`}}>🤝 Directo</div>}
+                  <div style={{marginLeft:"auto"}}>
+                    <button onClick={e=>{e.stopPropagation();onVerSobre(m);}} style={{
+                      background:C.blue,color:"white",border:`2px solid ${C.blueDark}`,
+                      borderRadius:8,padding:"5px 10px",fontFamily:"'Paytone One',cursive",
+                      fontSize:10,cursor:"pointer",boxShadow:`2px 2px 0 ${C.blueDark}`}}>
+                      📦 ¿Cómo hacer el cambio?
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+}
+
+
+// Helper: mensaje semanal según fecha del match
+function getMensajeSemanal(createdAt) {
+  if(!createdAt) return null;
+  const ahora = Date.now();
+  const diasPasados = Math.floor((ahora - createdAt) / 86400000);
+  if(diasPasados < 7) {
+    return "📦 Esta semana dejá tu sobre en Librería Papira · Tinogasta 3960";
+  } else {
+    return "📬 Esta semana retirá tu sobre de Librería Papira · Tinogasta 3960";
+  }
+}
+
+// ─── CHAT ─────────────────────────────────────────────────────────────────────
+// ESTADOS del chat:
+// "propuesta"  → match encontrado, esperando que ambos acepten
+// "esperando"  → yo acepté, esperando al otro
+// "aceptado"   → los dos aceptaron → mostrar punto + sobre
+// "cancelado"  → alguno rechazó
+
+function ChatScreen({match, user, onBack, onVerTicket, onFigurasEntregadas}) {
+  const esAdultoAmbos = user.edad >= 18 && match.esAdulto;
+
+  // ── FIREBASE GUARD ─────────────────────────────────────────
+  // Esperar a que Firebase esté listo antes de operar
+  // Crítico en celulares donde Firebase carga más lento
+  const fbReady = async () => {
+    let intentos = 0;
+    while(!window.fbDB && intentos < 10) {
+      await new Promise(r => setTimeout(r, 300));
+      intentos++;
+    }
+    return !!window.fbDB;
+  };
+  const [isFirebaseReady, setIsFirebaseReady] = useState(!!window.fbDB);
+  useEffect(() => {
+    fbReady().then(ready => setIsFirebaseReady(ready));
+  }, []);
+  // Si match.userId está vacío (viene de "Ver intercambio"), 
+  // reconstruir claveChat desde Firebase buscando el chat activo
+  const [claveChat, setClaveChat] = useState(
+    match.userId 
+      ? ["fb_chat", user.userId, match.userId].sort().join("_")
+      : null
+  );
+
+  // Si no hay claveChat, buscarla en Firebase
+  useEffect(() => {
+    if(!claveChat && window.fbDB) {
+      window.fbGetDocs(window.fbCollection(window.fbDB, "chats")).then(snap => {
+        snap.forEach(d => {
+          const data = d.data();
+          if(d.id.includes(user.userId) && 
+             (data.estadoA === "aceptado" || data.estadoB === "aceptado") &&
+             data.estado !== "completado" && data.estado !== "anulado") {
+            setClaveChat(d.id);
+            localStorage.setItem(d.id, JSON.stringify(data));
+          }
+        });
+      });
+    }
+  }, []);
+
+  // Estado compartido del chat (simulado via localStorage)
+  const getChatState = () => {
+    try {
+      if(!claveChat) return { estadoA: "pendiente", estadoB: "pendiente", msgs: [], codigo: null, punto: null };
+      const d = localStorage.getItem(claveChat);
+      return d ? JSON.parse(d) : { estadoA: "pendiente", estadoB: "pendiente", msgs: [], codigo: null, punto: null };
+    } catch(e) { return { estadoA: "pendiente", estadoB: "pendiente", msgs: [], codigo: null, punto: null }; }
+  };
+  const saveChatState = async (s) => {
+    try {
+      if(!claveChat) { console.error("saveChatState: claveChat es null!"); return; }
+      // Guardar en localStorage (inmediato)
+      localStorage.setItem(claveChat, JSON.stringify(s));
+      // Guardar en Firebase (compartido entre dispositivos)
+      if(window.fbDB) {
+            await window.fbSetDoc(
+          window.fbDoc(window.fbDB, "chats", claveChat),
+          { ...s, updatedAt: Date.now() }
+        );
+      } else {
+        console.error("Firebase NO disponible al guardar chat!");
+      }
+    } catch(e) { console.error("saveChatState error:", e); }
+  };
+  // Sincronizar estado del chat desde Firebase cada 3 segundos
+  useEffect(() => {
+    const syncChat = async () => {
+      if(window.fbDB) {
+        try {
+          const snap = await window.fbGetDoc(window.fbDoc(window.fbDB, "chats", claveChat));
+          if(snap.exists()) {
+            const data = snap.data();
+            // Siempre actualizar desde Firebase — no comparar timestamps
+            localStorage.setItem(claveChat, JSON.stringify(data));
+            setChatState(prev => {
+              // Solo re-renderizar si algo cambió
+              if(JSON.stringify(prev) !== JSON.stringify(data)) return data;
+              return prev;
+            });
+            // Si ambos aceptaron, mostrar advertencia automáticamente
+            if(data.estadoA === "aceptado" && data.estadoB === "aceptado") {
+              setAdvertenciaVista(true);
+            }
+          }
+        } catch(e) {}
+      }
+    };
+    syncChat();
+    const interval = setInterval(syncChat, 2000); // cada 2 segundos
+    return () => clearInterval(interval);
+  }, [claveChat]);
+
+  // Identidad dinámica — siempre basada en el documento de Firebase
+  // Nunca estática para evitar que los IDs se crucen entre dispositivos
+  const chatStateInit = getChatState();
+  const soyA = chatStateInit.userA
+    ? chatStateInit.userA === user.userId
+    : user.userId < match.userId;
+  const [chatState, setChatState] = useState(getChatState);
+  const [msgLibre, setMsgLibre] = useState("");
+  const [advertenciaVista, setAdvertenciaVista] = useState(false);
+  const [cargandoChat, setCargandoChat] = useState(true);
+  // Si no hay claveChat todavía, mostrar cargando
+  const chatListo = !!claveChat;
+  // Estado local para figuritas — se restaura desde Firebase si es necesario
+  const [matchFigus, setMatchFigus] = useState({
+    yoLeDoy: match.yoLeDoy || [],
+    elMeDa:  match.elMeDa  || [],
+  });
+
+  // Cargar estado del chat desde Firebase al abrir
+  useEffect(() => {
+    const cargarChat = async () => {
+      if(window.fbDB) {
+        try {
+          const snap = await window.fbGetDoc(window.fbDoc(window.fbDB, "chats", claveChat));
+          if(snap.exists()) {
+            const data = snap.data();
+            // Si el intercambio anterior ya se completó, ignorarlo y arrancar uno nuevo
+            if(data.estado === "completado") {
+              localStorage.removeItem(claveChat);
+              setCargandoChat(false);
+              return;
+            }
+            localStorage.setItem(claveChat, JSON.stringify(data));
+            setChatState(data);
+            // Si ambos aceptaron → ir directo al sobre
+            if(data.estadoA === "aceptado" && data.estadoB === "aceptado") {
+              setAdvertenciaVista(true);
+              // Restaurar figuritas desde Firebase usando estado local
+              if(data.figusDe && data.figusParA) {
+                const soyA_load = data.userA === user.userId;
+                setMatchFigus({
+                  yoLeDoy: soyA_load ? data.figusDe : data.figusParA,
+                  elMeDa:  soyA_load ? data.figusParA : data.figusDe,
+                });
+              }
+            }
+          }
+        } catch(e) { console.error("cargarChat error:", e); }
+      }
+      setCargandoChat(false);
+    };
+    cargarChat();
+  }, [claveChat]);
+
+
+
+  const miEstado    = soyA ? chatState.estadoA : chatState.estadoB;
+  const otroEstado  = soyA ? chatState.estadoB : chatState.estadoA;
+  const ambosAceptaron = chatState.estadoA === "aceptado" && chatState.estadoB === "aceptado";
+  const yoAcepte    = miEstado === "aceptado";
+  const algoCancelo = miEstado === "cancelado" || otroEstado === "cancelado";
+
+  const handleAceptar = async () => {
+    const ready = await fbReady();
+    if(!ready) {
+      alert("Conectando con el servidor... Reintentá en 2 segundos.");
+      return;
+    }
+    if(!claveChat) return;
+    const chatRef = window.fbDoc(window.fbDB, "chats", claveChat);
+    try {
+      // La transacción devuelve el nuevo estado para usarlo DESPUÉS
+      const nuevoEstadoCalculado = await window.fbRunTransaction(window.fbDB, async (transaction) => {
+        const chatDoc = await transaction.get(chatRef);
+        let s = chatDoc.exists() ? chatDoc.data() : {
+          estadoA: "pendiente", estadoB: "pendiente",
+          msgs: [], codigo: null, punto: null,
+          userA: soyA ? user.userId : match.userId,
+          apodoA: soyA ? user.apodo : match.apodo,
+          userB: soyA ? match.userId : user.userId,
+          apodoB: soyA ? match.apodo : user.apodo,
+          figusDe: soyA ? matchFigus.yoLeDoy : matchFigus.elMeDa,
+          figusParA: soyA ? matchFigus.elMeDa : matchFigus.yoLeDoy,
+        };
+        const soyA_real = s.userA ? s.userA === user.userId : soyA;
+        const updates = { updatedAt: window.fbTimestamp() };
+
+        if(soyA_real) updates.estadoA = "aceptado";
+        else updates.estadoB = "aceptado";
+        if(!s.codigo) updates.codigo = generarCodigoSobre();
+        if(!s.createdAt) updates.createdAt = window.fbTimestamp();
+
+        const nA = updates.estadoA || s.estadoA;
+        const nB = updates.estadoB || s.estadoB;
+        if(nA === "aceptado" && nB === "aceptado") {
+          updates.punto = "Librería Papira · Tinogasta 3960";
+          updates.estado = "acordado";
+        }
+        const msgs = [...(s.msgs || [])];
+        msgs.push({
+          texto: "✅ ¡Acepto el cambio!",
+          de: user.apodo,
+          hora: new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})
+        });
+        updates.msgs = msgs;
+        const finalData = {...s, ...updates};
+
+        if(chatDoc.exists()) transaction.update(chatRef, updates);
+        else transaction.set(chatRef, finalData);
+        return finalData;
+      });
+
+      // ÉXITO: Actualizamos React FUERA de la transacción
+      setChatState(nuevoEstadoCalculado);
+      localStorage.setItem(claveChat, JSON.stringify(nuevoEstadoCalculado));
+
+      // Reservar figuritas solo si la transacción fue exitosa
+      if(nuevoEstadoCalculado.codigo && matchFigus.yoLeDoy.length > 0) {
+        DBReservas.reservar(user.userId, matchFigus.yoLeDoy, nuevoEstadoCalculado.codigo);
+      }
+    } catch(e) {
+      console.error("Fallo crítico en la transacción:", e);
+      if(e.code === 'permission-denied') {
+        alert("Sin permiso. La página se va a recargar para reconectar.");
+        window.location.reload();
+      } else if(e.code === 'unavailable') {
+        alert("Sin conexión. Verificá tu internet y reintentá.");
+      } else {
+        // Error SES u otro error de móvil — recargar para limpiar memoria
+        alert("Error de conexión. La página se va a recargar automáticamente.");
+        setTimeout(() => window.location.reload(), 1500);
+      }
+    }
+  };
+
+  const handleCancelar = async () => {
+    const s = getChatState();
+    if(soyA) s.estadoA = "cancelado"; else s.estadoB = "cancelado";
+
+    // Liberar mis figuritas reservadas — vuelven a estar disponibles
+    DBReservas.liberar(user.userId, match.yoLeDoy);
+
+    s.msgs = [...(s.msgs||[]), {
+      texto: "❌ Rechacé el intercambio.",
+      de: user.apodo,
+      hora: new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})
+    }];
+    await saveChatState(s);
+    setChatState({...s});
+  };
+
+  const handleMsgLibre = async () => {
+    if(!msgLibre.trim()) return;
+    const s = getChatState();
+    s.msgs = [...(s.msgs||[]), {
+      texto: msgLibre.trim(),
+      de: user.apodo,
+      hora: new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})
+    }];
+    await saveChatState(s);
+    setChatState({...s});
+    setMsgLibre("");
+  };
+
+  const C_GOLD = "#F5C518";
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100vh",maxHeight:"100vh",background:C.bluePale,overflow:"hidden"}}>
+      {/* TOP BAR */}
+      <div style={{background:`linear-gradient(90deg,${C.blue} 0%,${C.blueDark} 100%)`,
+        borderBottom:`2px solid ${C.blueDark}`,padding:"12px 16px",
+        display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
+        <button onClick={onBack} style={{background:"rgba(255,255,255,.2)",border:"1.5px solid rgba(255,255,255,.4)",
+          color:"white",fontSize:18,cursor:"pointer",borderRadius:10,
+          width:34,height:34,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>←</button>
+        <div style={{width:36,height:36,borderRadius:10,background:C.bluePale,
+          border:`2px solid ${C.blueDark}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+          <AvatarSticker av={match.avatar} size={28}/>
+        </div>
+        <div>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:15,color:"white"}}>{match.apodo}</div>
+          <div style={{fontSize:11,color:"rgba(255,255,255,.7)",fontWeight:700}}>📍 {match.barrio}</div>
+        </div>
+        {/* Badge de estado */}
+        <div style={{marginLeft:"auto",background: ambosAceptaron?"#2ECC71":algoCancelo?"#E8162B":"rgba(255,255,255,.2)",
+          color:"white",fontSize:10,fontWeight:900,padding:"4px 8px",borderRadius:8,flexShrink:0}}>
+          {ambosAceptaron?"✅ ACORDADO":algoCancelo?"❌ CANCELADO":"⏳ PENDIENTE"}
+        </div>
+      </div>
+
+      {/* MENSAJES — scrolleable */}
+      <div style={{flex:1,overflowY:"auto",overflowX:"hidden",padding:"14px 16px 80px 16px",display:"flex",flexDirection:"column",gap:10,WebkitOverflowScrolling:"touch"}}>
+
+        {/* CARGANDO */}
+        {cargandoChat && (
+          <div style={{textAlign:"center",padding:"30px 0",color:C.muted,fontSize:13,fontWeight:700}}>
+            <div style={{animation:"float 1s ease-in-out infinite",marginBottom:8}}><S.Sol size={40}/></div>
+            Cargando conversación...
+          </div>
+        )}
+
+        {/* CARD INICIAL DEL MATCH */}
+        {!cargandoChat && <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:16,
+          padding:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark,marginBottom:10}}>
+            🔄 Match encontrado
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:0}}>
+            <div style={{background:`${C.green}18`,border:`2px solid ${C.green}`,borderRadius:10,padding:"8px 10px"}}>
+              <div style={{fontSize:9,color:C.greenDeep,fontWeight:900,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>
+                {match.apodo} te da ({matchFigus.elMeDa.length})
+              </div>
+              <div style={{fontSize:12,fontWeight:800,color:C.blueDeep}}>
+                {match.elMeDa.slice(0,4).join(", ")}{matchFigus.elMeDa.length>4?` +${matchFigus.elMeDa.length-4}`:""}
+              </div>
+            </div>
+            <div style={{background:`${C.blue}18`,border:`2px solid ${C.blue}`,borderRadius:10,padding:"8px 10px"}}>
+              <div style={{fontSize:9,color:C.blueDark,fontWeight:900,textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>
+                Vos le das ({matchFigus.yoLeDoy.length})
+              </div>
+              <div style={{fontSize:12,fontWeight:800,color:C.blueDeep}}>
+                {matchFigus.yoLeDoy.slice(0,4).join(", ")}{matchFigus.yoLeDoy.length>4?` +${matchFigus.yoLeDoy.length-4}`:""}
+              </div>
+            </div>
+          </div>
+        </div>}
+
+        {/* MENSAJES DEL CHAT */}
+        {(chatState.msgs||[]).map((m,i) => {
+          const esMio = m.de === user.apodo;
+          return (
+            <div key={i} style={{display:"flex",flexDirection:"column",alignItems:esMio?"flex-end":"flex-start"}}>
+              <div style={{maxWidth:"78%",padding:"9px 13px",borderRadius:18,fontSize:13,fontWeight:700,
+                lineHeight:1.4,
+                background:esMio?C.blue:"white",
+                color:esMio?"white":C.blueDeep,
+                border:`2px solid ${esMio?C.blueDark:C.blueLight}`,
+                boxShadow:`3px 3px 0 ${esMio?C.blueDark:C.blueLight}`,
+                borderBottomRightRadius:esMio?4:18,
+                borderBottomLeftRadius:esMio?18:4}}>
+                {m.texto}
+              </div>
+              <div style={{fontSize:10,color:C.muted,fontWeight:700,marginTop:2}}>
+                {m.de} · {m.hora}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* ESTADO: PROPUESTA — botones aceptar/rechazar */}
+        {!cargandoChat && !yoAcepte && !algoCancelo && (
+          <div style={{background:"white",border:`2px solid ${C.gold}`,borderRadius:14,padding:14,
+            boxShadow:`3px 3px 0 ${C.gold}`}}>
+            <div style={{fontSize:13,fontWeight:700,color:C.blueDeep,marginBottom:10,textAlign:"center"}}>
+              ¿Aceptás este intercambio?
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <button onClick={handleAceptar} disabled={!isFirebaseReady} style={{background:isFirebaseReady?C.green:"#aaa",color:"white",
+                border:`2px solid ${C.greenDeep}`,borderRadius:12,padding:"11px",
+                fontFamily:"'Paytone One',cursive",fontSize:14,cursor:"pointer",
+                boxShadow:`3px 3px 0 ${C.greenDeep}`}}>
+                ✅ Acepto
+              </button>
+              <button onClick={handleCancelar} style={{background:"white",color:C.red,
+                border:`2px solid ${C.red}`,borderRadius:12,padding:"11px",
+                fontFamily:"'Paytone One',cursive",fontSize:14,cursor:"pointer",
+                boxShadow:`3px 3px 0 ${C.red}`}}>
+                ❌ No, gracias
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ESTADO: YO ACEPTÉ, ESPERANDO AL OTRO */}
+        {!cargandoChat && yoAcepte && !ambosAceptaron && !algoCancelo && (
+          <div style={{background:`${C.gold}22`,border:`2px solid ${C.gold}`,borderRadius:14,padding:12,
+            fontSize:13,fontWeight:700,color:C.blueDeep,textAlign:"center",lineHeight:1.6}}>
+            {chatState.codigo 
+              ? "✅ Ya hay un código generado. El sobre está listo aunque el otro acepte después."
+              : <span>✅ Aceptaste. Esperando que <strong>{match.apodo}</strong> acepte también...</span>
+            }
+            <div style={{fontSize:11,color:C.muted,marginTop:6,lineHeight:1.6}}>
+              ⏳ La pantalla se actualiza sola cada 2 segundos.<br/>
+              <strong>¡No la cierres ni la recargues!</strong> Esperá nomás. 🧉
+            </div>
+          </div>
+        )}
+
+        {/* ESTADO: PROPUESTA — aviso de paciencia */}
+        {!yoAcepte && !algoCancelo && (
+          <div style={{fontSize:11,color:C.muted,fontWeight:700,textAlign:"center",
+            padding:"6px 0",lineHeight:1.6}}>
+            ⏳ Si aceptás, esperá unos segundos — el sistema se sincroniza solo.
+          </div>
+        )}
+
+        {/* ESTADO: CANCELADO */}
+        {algoCancelo && (
+          <div style={{background:"#FFF0F0",border:`2px solid ${C.red}`,borderRadius:14,padding:12,
+            fontSize:13,fontWeight:700,color:C.red,textAlign:"center"}}>
+            ❌ El intercambio fue cancelado.
+          </div>
+        )}
+
+        {/* ESTADO: LOS DOS ACEPTARON O YA HAY CÓDIGO → PUNTO + SOBRE */}
+        {(ambosAceptaron || chatState.codigo) && (
+          <>
+            {/* PUNTO DE RETIRO */}
+            <div style={{background:"white",border:`2px solid ${C.green}`,borderRadius:14,padding:14,
+              boxShadow:`3px 3px 0 ${C.green}`}}>
+              <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.greenDeep,marginBottom:8}}>
+                📍 Punto de retiro
+              </div>
+              <div style={{fontSize:14,fontWeight:900,color:C.blueDeep,marginBottom:4}}>
+                Librería Papira
+              </div>
+              <div style={{fontSize:12,fontWeight:700,color:C.muted,marginBottom:10}}>
+                Tinogasta 3960, Villa Devoto
+              </div>
+              <a href="https://maps.google.com/?q=Tinogasta+3960+Villa+Devoto+Buenos+Aires"
+                target="_blank" rel="noopener noreferrer"
+                style={{display:"inline-flex",alignItems:"center",gap:6,
+                  background:C.blue,color:"white",border:`2px solid ${C.blueDark}`,
+                  borderRadius:10,padding:"7px 14px",fontSize:12,fontWeight:900,
+                  textDecoration:"none",boxShadow:`2px 2px 0 ${C.blueDark}`}}>
+                🗺️ Ver en Google Maps
+              </a>
+            </div>
+
+            {/* AVISO SEMANAL */}
+            {(() => {
+              const msg = getMensajeSemanal(chatState.createdAt);
+              if(!msg) return null;
+              const esRetiro = msg.includes("retirá");
+              return (
+                <div style={{background: esRetiro ? `${C.blue}18` : `${C.green}18`,
+                  border:`2px solid ${esRetiro ? C.blue : C.green}`,
+                  borderRadius:14,padding:12,fontSize:13,fontWeight:700,
+                  color:C.blueDeep,lineHeight:1.6,textAlign:"center"}}>
+                  {msg}
+                </div>
+              );
+            })()}
+
+            {/* ADVERTENCIA */}
+            {!advertenciaVista && (
+              <div style={{background:"#FFF8E1",border:`2px solid ${C.gold}`,borderRadius:14,padding:14,
+                boxShadow:`3px 3px 0 ${C.gold}`}}>
+                <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.goldDeep,marginBottom:10}}>
+                  ⚠️ Leé antes de continuar
+                </div>
+                {[
+                  "Tenés hasta el domingo para dejar tu sobre en el punto.",
+                  "Si no retirás el sobre del otro, es tu responsabilidad. Esa figurita se considera perdida.",
+                  "Si el otro no retira lo tuyo, podés pasar a buscarlo cuando quieras. Te recomendamos que sea a la brevedad.",
+                  "El código se anula automáticamente a los 15 días sin confirmar.",
+                ].map((txt,i) => (
+                  <div key={i} style={{display:"flex",gap:8,marginBottom:8,fontSize:12,
+                    fontWeight:700,color:C.blueDeep,lineHeight:1.5}}>
+                    <span style={{color:C.gold,flexShrink:0}}>•</span>
+                    <span>{txt}</span>
+                  </div>
+                ))}
+                <button onClick={()=>setAdvertenciaVista(true)}
+                  style={{width:"100%",background:C.gold,color:C.blueDeep,
+                    border:`2px solid ${C.goldDeep}`,borderRadius:12,padding:"10px",
+                    fontFamily:"'Paytone One',cursive",fontSize:13,cursor:"pointer",
+                    boxShadow:`3px 3px 0 ${C.goldDeep}`,marginTop:6}}>
+                  ✅ Entendido
+                </button>
+              </div>
+            )}
+
+            {/* SOBRE + ETIQUETA IMPRIMIBLE */}
+            {advertenciaVista && (
+              <>
+                {/* Vista en pantalla — resumen del intercambio */}
+                <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+                  padding:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+                  <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark,marginBottom:10}}>
+                    📦 Resumen del intercambio
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    marginBottom:10,padding:"8px 12px",background:C.bluePale,borderRadius:10,
+                    border:`2px solid ${C.blueDark}`}}>
+                    <div>
+                      <div style={{fontSize:9,color:C.muted,fontWeight:900,textTransform:"uppercase",letterSpacing:1}}>Código</div>
+                      <div style={{fontFamily:"'Paytone One',cursive",fontSize:20,color:C.blueDark,letterSpacing:2}}>
+                        {chatState.codigo}
+                      </div>
+                    </div>
+                    <div style={{fontSize:10,color:C.muted,fontWeight:700,textAlign:"right"}}>
+                      Semana {getSemanaKey()}<br/>Vence en 15 días
+                    </div>
+                  </div>
+                  <div style={{fontSize:12,fontWeight:700,color:C.blueDeep,lineHeight:1.8}}>
+                    <div>📤 <strong>De:</strong> {user.apodo} · +54 9 11 {user.telefono}</div>
+                    <div>📥 <strong>Para:</strong> {match.apodo}</div>
+                    <div>🃏 <strong>Figuritas:</strong> {match.yoLeDoy.join(", ")}</div>
+                    <div>📍 <strong>Punto:</strong> Librería Papira · Tinogasta 3960</div>
+                  </div>
+                </div>
+
+
+                {/* BOTÓN IMPRIMIR */}
+                <button onClick={()=>{
+                    // Abre ventana nueva con solo la etiqueta para imprimir limpio
+                    const codigo = chatState.codigo || "";
+                    const semana = getSemanaKey();
+                    const figus = (match.yoLeDoy||[]).join(" · ");
+                    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+                    <style>
+                      * { margin:0; padding:0; box-sizing:border-box; }
+                      body { font-family: Arial, sans-serif; background:white; }
+                      .etiqueta {
+                        width: 10cm; min-height: 14cm;
+                        border: 2px solid black;
+                        padding: 0.5cm;
+                        display: flex; flex-direction: column; gap: 0.3cm;
+                        page-break-after: avoid;
+                      }
+                      .header { text-align:center; border-bottom:2px solid black; padding-bottom:0.2cm; }
+                      .logo { font-size:20pt; font-weight:900; }
+                      .sub { font-size:8pt; letter-spacing:2px; text-transform:uppercase; }
+                      .codigo-box { text-align:center; border-bottom:1px dashed black; padding:0.15cm 0; }
+                      .codigo-label { font-size:7pt; font-weight:700; text-transform:uppercase; letter-spacing:2px; }
+                      .codigo-num { font-size:26pt; font-weight:900; font-family:monospace; letter-spacing:4px; }
+                      .seccion { border-bottom:1px solid black; padding-bottom:0.2cm; }
+                      .sec-label { font-size:7pt; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#555; margin-bottom:0.1cm; }
+                      .sec-val { font-size:12pt; font-weight:900; }
+                      .sec-sub { font-size:10pt; font-weight:700; }
+                      .punto { margin-top:auto; text-align:center; }
+                      .punto-label { font-size:7pt; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#555; }
+                      .punto-val { font-size:11pt; font-weight:900; }
+                      @media print { body { margin:0; } }
+                    </style></head><body>
+                    <div class="etiqueta">
+                      <div class="header">
+                        <div class="logo">🃏 FiguBarrio</div>
+                        <div class="sub">Mundial FIFA 2026</div>
+                      </div>
+                      <div class="codigo-box">
+                        <div class="codigo-label">Código de intercambio</div>
+                        <div class="codigo-num">${codigo}</div>
+                        <div class="sec-sub">${semana} · Vence en 15 días</div>
+                      </div>
+                      <div class="seccion">
+                        <div class="sec-label">── DE ─────────────────────</div>
+                        <div class="sec-val">Usuario: ${user.apodo}</div>
+                        <div class="sec-sub">Tel: +54 9 11 ${user.telefono}</div>
+                      </div>
+                      <div class="seccion">
+                        <div class="sec-label">── PARA ────────────────────</div>
+                        <div class="sec-val">Usuario: ${match.apodo}</div>
+                      </div>
+                      <div class="seccion">
+                        <div class="sec-label">── FIGURITAS ADENTRO ───────</div>
+                        <div class="sec-val" style="font-size:11pt">${figus}</div>
+                      </div>
+                      <div class="punto">
+                        <div class="punto-label">Punto de retiro</div>
+                        <div class="punto-val">Librería Papira</div>
+                        <div class="sec-sub">Tinogasta 3960 · Villa Devoto</div>
+                      </div>
+                    </div>
+                    <script>window.onload=()=>{window.print();}<\/script>
+                    </body></html>`;
+                    const win = window.open("","_blank","width=500,height=700");
+                    win.document.write(html);
+                    win.document.close();
+                  }}
+                  style={{width:"100%",background:C.blue,color:"white",border:`2px solid ${C.blueDark}`,
+                    borderRadius:12,padding:"12px",fontFamily:"'Paytone One',cursive",fontSize:15,
+                    cursor:"pointer",boxShadow:`3px 3px 0 ${C.blueDark}`}}>
+                  🖨️ Imprimir etiqueta del sobre
+                </button>
+
+                {/* BOTONES DE ACCIÓN SEGÚN ESTADO */}
+                {(() => {
+                  const soyA_btn = user.userId === chatState.userA;
+                  const yoDejeElSobre  = soyA_btn ? chatState.dejeA  : chatState.dejeB;
+                  const yoRecibiElSobre = soyA_btn ? chatState.recibiA : chatState.recibiB;
+                  const elOtroDejoElSobre = soyA_btn ? chatState.dejeB : chatState.dejeA;
+
+                  return (
+                    <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:8}}>
+                      {/* PASO 1: Dejar el sobre */}
+                      {!yoDejeElSobre && (
+                        <button onClick={async () => {
+                          const s = getChatState();
+                          if(soyA_btn) s.dejeA = true; else s.dejeB = true;
+                          s.updatedAt = Date.now();
+                          await saveChatState(s);
+                          setChatState({...s});
+                        }} style={{
+                          width:"100%",background:C.blue,color:"white",
+                          border:`2px solid ${C.blueDark}`,borderRadius:12,padding:"12px",
+                          fontFamily:"'Paytone One',cursive",fontSize:14,cursor:"pointer",
+                          boxShadow:`3px 3px 0 ${C.blueDark}`}}>
+                          📦 Ya dejé mi sobre
+                        </button>
+                      )}
+
+                      {yoDejeElSobre && !elOtroDejoElSobre && (
+                        <div style={{background:`${C.blue}18`,border:`2px solid ${C.blue}`,
+                          borderRadius:12,padding:12,fontSize:13,fontWeight:700,
+                          color:C.blueDark,textAlign:"center"}}>
+                          ✅ Dejaste tu sobre. Esperando que el otro también deje el suyo...
+                        </div>
+                      )}
+
+                      {/* PASO 2: Confirmar recibo — aparece en semana 2 */}
+                      {yoDejeElSobre && elOtroDejoElSobre && !yoRecibiElSobre && (
+                        <button onClick={async () => {
+                          const s = getChatState();
+                          if(soyA_btn) s.recibiA = true; else s.recibiB = true;
+                          if(s.recibiA && s.recibiB) s.estado = "completado";
+                          s.updatedAt = Date.now();
+                          await saveChatState(s);
+                          setChatState({...s});
+                          // Borrar del álbum las figuritas que YO entregué
+                          // (ya no las tengo — se las di al otro)
+                          if(onFigurasEntregadas && matchFigus.yoLeDoy.length > 0) {
+                            onFigurasEntregadas(matchFigus.yoLeDoy);
+                          }
+                          if(s.recibiA && s.recibiB) setCalificando(true);
+                        }} style={{
+                          width:"100%",background:C.green,color:"white",
+                          border:`2px solid ${C.greenDeep}`,borderRadius:12,padding:"12px",
+                          fontFamily:"'Paytone One',cursive",fontSize:14,cursor:"pointer",
+                          boxShadow:`3px 3px 0 ${C.greenDeep}`}}>
+                          ✅ Ya recibí mi sobre
+                        </button>
+                      )}
+
+                      {yoRecibiElSobre && chatState.estado !== "completado" && (
+                        <div style={{background:`${C.green}18`,border:`2px solid ${C.green}`,
+                          borderRadius:12,padding:12,fontSize:13,fontWeight:700,
+                          color:C.greenDeep,textAlign:"center"}}>
+                          ✅ Confirmaste que recibiste. Esperando que el otro confirme también...
+                        </div>
+                      )}
+
+                      {chatState.estado === "completado" && (
+                        <div style={{background:`${C.green}18`,border:`2px solid ${C.green}`,
+                          borderRadius:14,padding:14,fontSize:14,fontWeight:700,
+                          color:C.greenDeep,textAlign:"center"}}>
+                          🎉 ¡Intercambio completado! Los dos confirmaron.
+                        </div>
+                      )}
+
+                      {/* CANCELAR */}
+                      {!yoDejeElSobre && (
+                        <button onClick={async () => {
+                          const s = getChatState();
+                          s.estado = "anulado";
+                          s.updatedAt = Date.now();
+                          await saveChatState(s);
+                          setChatState({...s});
+                        }} style={{
+                          width:"100%",background:"white",color:C.red,
+                          border:`2px solid ${C.red}`,borderRadius:12,padding:"10px",
+                          fontFamily:"'Nunito',sans-serif",fontSize:13,fontWeight:900,
+                          cursor:"pointer"}}>
+                          ↩️ No puedo, quiero retirar lo que dejé
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+
+            {/* CHAT LIBRE PARA ADULTOS */}
+            {esAdultoAmbos && advertenciaVista && (
+              <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,padding:12}}>
+                <div style={{fontSize:11,color:C.muted,fontWeight:900,textTransform:"uppercase",
+                  letterSpacing:1,marginBottom:8}}>💬 Chat (solo adultos)</div>
+                <div style={{display:"flex",gap:8}}>
+                  <input
+                    value={msgLibre}
+                    onChange={e=>setMsgLibre(e.target.value)}
+                    onKeyDown={e=>{if(e.key==="Enter"&&msgLibre.trim()){handleMsgLibre();}}}
+                    placeholder="Escribí un mensaje..."
+                    style={{flex:1,background:C.bluePale,border:`2px solid ${C.blue}`,
+                      borderRadius:10,padding:"9px 12px",color:C.blueDeep,
+                      fontFamily:"'Nunito',sans-serif",fontSize:13,fontWeight:700,
+                      outline:"none",minWidth:0}}/>
+                  <button
+                    onClick={()=>{ if(msgLibre.trim()) handleMsgLibre(); }}
+                    style={{background:C.blue,color:"white",border:`2px solid ${C.blueDark}`,
+                      borderRadius:10,padding:"0 16px",fontFamily:"'Paytone One',cursive",
+                      fontSize:13,cursor:"pointer",boxShadow:`2px 2px 0 ${C.blueDark}`,
+                      flexShrink:0,height:42}}>
+                    Enviar
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={{height:20}}/>
+      </div>
+    </div>
+  );
+}
+
+// ─── TICKET ───────────────────────────────────────────────────────────────────
+function TicketScreen({match, punto, user, onBack}) {
+  const codigo = `FB-${Math.random().toString(36).substr(2,6).toUpperCase()}`;
+  const sem2   = new Date(Date.now()+7*24*60*60*1000);
+  const fmt    = d=>d.toLocaleDateString("es-AR",{day:"numeric",month:"long"});
+  return (
+    <div className="screen">
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:11}}>
+        <button onClick={onBack} style={{background:C.bluePale,border:`2px solid ${C.blueDark}`,color:C.blueDark,
+          cursor:"pointer",fontSize:17,borderRadius:10,width:34,height:34,
+          display:"flex",alignItems:"center",justifyContent:"center",boxShadow:`2px 2px 0 ${C.blue}`}}>←</button>
+        <div className="stitle">Tu Sobre 📦</div>
+        <div style={{display:"flex",gap:4}}><S.Estrella size={15}/><S.Estrella size={15}/><S.Estrella size={15}/></div>
+      </div>
+      <div className="ok-box" style={{marginBottom:11}}>
+        <span>💡</span><span>Mostrá este ticket en el punto. El encargado guarda tu sobre.</span>
+      </div>
+      <div className="ticket">
+        <div style={{display:"flex",alignItems:"center",gap:9,paddingTop:8,marginBottom:2}}>
+          <S.Sol size={30}/><div className="t-title">FiguBarrio</div>
+          <div style={{marginLeft:"auto"}}><S.Bandera size={40}/></div>
+        </div>
+        <div className="t-sub">Sobre de intercambio · {codigo}</div>
+        <div className="t-row"><div className="t-key">Para</div><div className="t-val">{match.apodo}</div></div>
+        <div className="t-row">
+          <div className="t-key">Figuritas</div>
+          <div className="t-val" style={{fontSize:11}}>
+            #{match.yoLeDoy.slice(0,5).join(", #")}{match.yoLeDoy.length>5?` y ${match.yoLeDoy.length-5} más`:""}
+          </div>
+        </div>
+        <div className="t-row"><div className="t-key">Punto</div><div className="t-val">{punto.nombre}<br/><span style={{fontSize:11,color:C.muted}}>{punto.direccion}</span></div></div>
+        <div className="t-row"><div className="t-key">Tel. remitente</div><div className="t-val" style={{color:C.red}}>{user.telefono}<br/><span style={{fontSize:10,color:C.muted,fontWeight:700}}>Solo para el encargado</span></div></div>
+        <div className="t-row"><div className="t-key">Dejar antes del</div><div className="t-val">{fmt(sem2)}</div></div>
+        <div style={{width:54,height:54,background:C.bluePale,borderRadius:11,display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,margin:"11px auto 4px",border:`2px solid ${C.blueLight}`}}>📱</div>
+        <div style={{fontSize:10,color:C.muted,fontWeight:700,textAlign:"center",marginBottom:2}}>Código QR al confirmar</div>
+        <div className="t-weeks">
+          <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:5}}>
+            <S.Empanada size={28}/><S.Mate size={28}/>
+          </div>
+          📦 <strong>Semana 1</strong> — Vos dejás el sobre<br/>
+          📬 <strong>Semana 2</strong> — {match.apodo} retira · vos buscás el tuyo
+        </div>
+      </div>
+      <button className="btn" style={{marginBottom:9}}>📤 Compartir / Imprimir</button>
+      <button className="btn2" onClick={onBack}>← Volver al chat</button>
+    </div>
+  );
+}
+
+// ─── PUNTOS ───────────────────────────────────────────────────────────────────
+function PuntosScreen() {
+  const [sel, setSel] = useState(null);
+  return (
+    <div className="screen">
+      <div className="pheader">
+        <StickerBg opacity={0.12}/>
+        <div className="pheader-inner">
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div className="stitle stitle-w">📍 Puntos de Retiro</div>
+            <div style={{display:"flex",flexDirection:"column",gap:8,alignItems:"center"}}>
+              <S.Mate size={36}/><S.Empanada size={40}/>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style={{background:C.blueLight,border:`2px solid ${C.blueDark}`,borderRadius:14,height:130,marginBottom:14,
+        display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:8,
+        position:"relative",overflow:"hidden",boxShadow:`4px 4px 0 ${C.blue}`}}>
+        <div style={{fontSize:30}}>🗺️</div>
+        <div style={{fontFamily:"'Paytone One',cursive",fontSize:12,color:C.blueDark}}>Mapa de {PUNTOS.length} puntos</div>
+        {[{top:22,left:55,c:C.blue},{top:74,left:142,c:C.green},{top:40,right:55,c:C.gold}].map((d,i)=>(
+          <div key={i} style={{position:"absolute",top:d.top,left:d.left,right:d.right,
+            width:13,height:13,background:d.c,borderRadius:"50%",border:`2px solid ${C.blueDark}`,boxShadow:`0 0 0 3px ${d.c}44`}}/>
+        ))}
+      </div>
+      <div className="sectitle">Puntos en tu barrio</div>
+      {PUNTOS.map(p=>(
+        <div key={p.id} className={`pcard ${sel===p.id?"sel":""}`} onClick={()=>setSel(p.id)}>
+          <div className="picon">{p.tipo==="libreria"?"📚":"📍"}</div>
+          <div><div className="pname">{p.nombre}</div><div className="pdir">{p.direccion}</div></div>
+          {sel===p.id?<div className="pbadge">✅ OK</div>:<div style={{marginLeft:"auto",color:C.muted,fontSize:17}}>›</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+// ─── PERFIL ──────────────────────────────────────────────────────────────────
+function PerfilScreen({ user, figus, adsEnabled, setAdsEnabled }) {
+  const alb  = ALBUMES.find(a => a.id === user.albumId);
+  const rep  = DBRep.get(user.userId);
+  const reps = Object.values(figus).filter(v => v === "repetida").length;
+  const tengo = Object.values(figus).filter(v => v === "tengo").length;
+  const esAdulto = user.edad >= 18;
+
+  return (
+    <div className="screen">
+      {/* HEADER */}
+      <div className="pheader">
+        <StickerBg opacity={0.12}/>
+        <div className="pheader-inner" style={{textAlign:"center",position:"relative",zIndex:1}}>
+          {/* Avatar grande */}
+          <div style={{width:90,height:90,borderRadius:"50%",background:"white",
+            border:`3px solid ${C.blueDark}`,display:"flex",alignItems:"center",
+            justifyContent:"center",margin:"0 auto 12px",
+            boxShadow:`4px 4px 0 ${C.blue}`}}>
+            <AvatarSticker av={user.avatar} size={60}/>
+          </div>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:26,color:"white",
+            textShadow:`2px 2px 0 ${C.blueDark}`}}>{user.apodo}</div>
+          <div style={{fontSize:12,color:"rgba(255,255,255,.75)",fontWeight:800,marginTop:3}}>
+            📍 {user.barrio} · {user.edad<13?"👶 Menor":user.edad<18?"🧒 Joven":"🧑 Adulto"}
+          </div>
+          <div style={{display:"flex",justifyContent:"center",gap:4,marginTop:8}}>
+            <S.Estrella size={16}/><S.Estrella size={16}/><S.Estrella size={16}/>
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-around",padding:"0 24px 14px",
+          position:"relative",zIndex:1}}>
+          <S.Camiseta size={40}/><S.Mate size={36}/><S.Capibara size={44}/>
+        </div>
+      </div>
+
+      <div style={{height:14}}/>
+
+      {/* STATS */}
+      <div className="srow">
+        <div className="sbox">
+          <div className="snum">{rep.total}</div>
+          <div className="slbl">Cambios</div>
+        </div>
+        <div className="sbox">
+          <div className="snum" style={{fontSize:18}}>
+            {"⭐".repeat(Math.min(5,Math.round(rep.puntos)))}
+          </div>
+          <div className="slbl">{rep.puntos.toFixed(1)} rep.</div>
+        </div>
+        <div className="sbox">
+          <div className="snum">{reps}</div>
+          <div className="slbl">Para dar</div>
+        </div>
+      </div>
+
+      {/* REPUTACIÓN — últimas reseñas */}
+      {rep.resenas.length > 0 && (
+        <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+          padding:14,marginBottom:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+          <div className="sectitle" style={{marginBottom:10}}>Últimas reseñas</div>
+          {rep.resenas.slice(0,3).map((r,i) => (
+            <div key={i} style={{borderBottom:i<2?`1px dashed ${C.blueLight}`:"none",
+              paddingBottom:8,marginBottom:8}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                <span style={{fontSize:12}}>{"⭐".repeat(r.estrellas)}</span>
+                <span style={{fontSize:11,color:C.muted,fontWeight:700}}>— {r.deQuien}</span>
+              </div>
+              {r.comentario && (
+                <div style={{fontSize:12,color:C.blueDeep,fontWeight:700,fontStyle:"italic"}}>
+                  "{r.comentario}"
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ESCUDO DE SEGURIDAD */}
+      <div className="shield">
+        <span style={{fontSize:22,flexShrink:0}}>🛡️</span>
+        <div className="shtext">
+          <strong>Cuenta protegida</strong><br/>
+          {esAdulto
+            ? "Podés usar tanto el sobre como el intercambio directo."
+            : "Solo intercambiás por sobre en puntos verificados."}
+        </div>
+      </div>
+
+      {/* MODALIDADES */}
+      <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+        padding:14,marginBottom:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+        <div className="sectitle" style={{marginBottom:10}}>Modalidades disponibles</div>
+        <div style={{display:"flex",gap:8}}>
+          <div style={{background:C.green,color:"white",fontSize:12,fontWeight:900,
+            padding:"6px 12px",borderRadius:8,border:`2px solid ${C.greenDeep}`,
+            boxShadow:`2px 2px 0 ${C.greenDeep}`}}>📦 Por Sobre ✅</div>
+          <div style={{background:esAdulto?C.gold:"#eee",
+            color:esAdulto?C.blueDeep:C.muted,fontSize:12,fontWeight:900,
+            padding:"6px 12px",borderRadius:8,
+            border:`2px solid ${esAdulto?C.goldDeep:C.blueLight}`,
+            boxShadow:esAdulto?`2px 2px 0 ${C.goldDeep}`:"none"}}>
+            🤝 Directo {esAdulto?"✅":"🔒"}
+          </div>
+        </div>
+      </div>
+
+      {/* ÁLBUM */}
+      {alb && (
+        <div>
+          <div className="sectitle">Mi álbum activo</div>
+          <div className="acard" style={{background:`linear-gradient(135deg,${alb.colorA} 0%,${alb.colorB} 100%)`}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={{fontSize:30}}>{alb.emoji}</span>
+              <div style={{flex:1}}>
+                <div className="aname">{alb.nombre}</div>
+                <div className="apbar-wrap">
+                  <div className="apbar" style={{width:`${Math.round((tengo+reps)/alb.total*100)}%`}}/>
+                </div>
+                <div className="astats">
+                  <span>{tengo+reps} de {alb.total}</span>
+                  <span>{reps} para dar</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AHORRO — estadísticas dentro del perfil */}
+      {(() => {
+        const PRECIO_SOBRE = 2350;
+        const FIGUS_POR_SOBRE = 7;
+        const TOTAL_FIGUS = 980;
+        const PRECIO_FIGU = Math.round(PRECIO_SOBRE / FIGUS_POR_SOBRE);
+        const repsCount = Object.values(figus).filter(v=>v==="repetida").length;
+        const ahorroPropio = repsCount * PRECIO_FIGU;
+        const ahorroPersona = 134000;
+        const fmt = n => n.toLocaleString("es-AR",{style:"currency",currency:"ARS",maximumFractionDigits:0});
+        return (
+          <div style={{background:`linear-gradient(135deg,${C.green} 0%,${C.greenDeep} 100%)`,
+            border:`2px solid ${C.greenDeep}`,borderRadius:16,padding:16,marginBottom:14,
+            boxShadow:`4px 4px 0 ${C.greenDeep}`}}>
+            <div style={{fontFamily:"'Paytone One',cursive",fontSize:13,color:"rgba(255,255,255,.8)",
+              marginBottom:4}}>💰 Tu ahorro estimado intercambiando</div>
+            <div style={{fontFamily:"'Paytone One',cursive",fontSize:30,color:"white",
+              textShadow:`1px 1px 0 ${C.greenDeep}`}}>{fmt(ahorroPersona)}</div>
+            {repsCount > 0 && (
+              <div style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,.8)",marginTop:6}}>
+                🃏 Tus {repsCount} repetidas valen {fmt(ahorroPropio)} de ahorro
+              </div>
+            )}
+            <button onClick={()=>{
+              const texto = `🃏 FiguBarrio me ayuda a ahorrar ${fmt(ahorroPersona)} en el álbum del Mundial 2026. ¡Intercambiá figuritas con vecinos del barrio! 🇦🇷`;
+              if(navigator.share){navigator.share({title:"FiguBarrio",text:texto});}
+              else{navigator.clipboard.writeText(texto);alert("¡Texto copiado!");}
+            }} style={{marginTop:10,background:"rgba(255,255,255,.2)",color:"white",
+              border:"2px solid rgba(255,255,255,.5)",borderRadius:10,padding:"7px 14px",
+              fontFamily:"'Paytone One',cursive",fontSize:12,cursor:"pointer"}}>
+              📣 Compartir este ahorro
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* CONFIGURACIÓN ADS */}
+      <div className="sectitle" style={{marginTop:8}}>Configuración</div>
+      <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+        padding:14,display:"flex",alignItems:"center",gap:12,marginBottom:14,
+        boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+        <div style={{flex:1}}>
+          <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark}}>
+            Mostrar publicidad
+          </div>
+          <div style={{fontSize:11,color:C.muted,fontWeight:700,marginTop:2,lineHeight:1.4}}>
+            {adsEnabled?"Nos ayuda a mantener la app gratuita.":"Publicidad desactivada."}
+          </div>
+        </div>
+        <button onClick={()=>setAdsEnabled(!adsEnabled)}
+          style={{width:44,height:24,borderRadius:12,border:`2px solid ${C.blueDark}`,
+            cursor:"pointer",position:"relative",
+            background:adsEnabled?C.blue:C.blueLight,flexShrink:0,transition:"background .2s"}}>
+          <div style={{position:"absolute",top:2,
+            left:adsEnabled?"22px":"3px",width:17,height:17,
+            borderRadius:"50%",background:"white",
+            border:`1.5px solid ${C.blueDark}`,transition:"left .2s"}}/>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── PANTALLA DE AHORRO ───────────────────────────────────────────────────────
+function AhorroScreen({ figus }) {
+  const PRECIO_SOBRE = 2350;
+  const FIGUS_POR_SOBRE = 7;
+  const TOTAL_FIGUS = 980;
+  const PRECIO_FIGU = Math.round(PRECIO_SOBRE / FIGUS_POR_SOBRE);
+
+  // Stats del usuario
+  const reps   = Object.values(figus).filter(v => v === "repetida").length;
+  const tengo  = Object.values(figus).filter(v => v === "tengo").length;
+  const totalMarcadas = tengo + reps;
+
+  // Cálculos generales
+  const costoComprando   = TOTAL_FIGUS * PRECIO_FIGU;
+  const sobresNecesarios = Math.ceil(TOTAL_FIGUS / FIGUS_POR_SOBRE * 1.4); // 40% repetidas promedio
+  const costoReal        = sobresNecesarios * PRECIO_SOBRE;
+  const ahorroPersona    = Math.round(costoReal - costoComprando * 0.6);
+  const ahorroFamilia    = ahorroPersona * 2;
+
+  // Stats del usuario
+  const ahorroPropio = reps * PRECIO_FIGU;
+
+  const fmt = n => n.toLocaleString("es-AR", { style:"currency", currency:"ARS", maximumFractionDigits:0 });
+
+  return (
+    <div className="screen">
+      {/* HEADER */}
+      <div className="pheader">
+        <StickerBg opacity={0.12}/>
+        <div className="pheader-inner" style={{position:"relative",zIndex:1}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div>
+              <div className="stitle stitle-w">💰 Tu ahorro</div>
+              <div style={{marginTop:6}}>
+                <div className="chip">Mundial FIFA 2026</div>
+              </div>
+            </div>
+            <div style={{animation:"float 3.5s ease-in-out infinite"}}>
+              <S.Sol size={54}/>
+            </div>
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-around",padding:"0 20px 14px",
+          position:"relative",zIndex:1}}>
+          <S.Empanada size={32}/><S.Mate size={32}/><S.Pelota size={32}/>
+        </div>
+      </div>
+
+      {/* NÚMERO GRANDE DE AHORRO */}
+      <div style={{background:`linear-gradient(135deg,${C.green} 0%,${C.greenDeep} 100%)`,
+        border:`2px solid ${C.greenDeep}`,borderRadius:18,padding:20,marginBottom:14,
+        boxShadow:`5px 5px 0 ${C.greenDeep}`,textAlign:"center"}}>
+        <div style={{fontSize:12,fontWeight:900,color:"rgba(255,255,255,.8)",
+          textTransform:"uppercase",letterSpacing:2,marginBottom:6}}>
+          Ahorro estimado por persona
+        </div>
+        <div style={{fontFamily:"'Paytone One',cursive",fontSize:38,color:"white",
+          textShadow:`2px 2px 0 ${C.greenDeep}`,lineHeight:1}}>
+          {fmt(ahorroPersona)}
+        </div>
+        <div style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,.75)",marginTop:6}}>
+          intercambiando en vez de comprar
+        </div>
+      </div>
+
+      {/* STATS GENERALES */}
+      <div className="sectitle">¿Cómo se calcula?</div>
+
+      {[
+        { label:"Precio del sobre", valor:`${fmt(PRECIO_SOBRE)} (7 figuritas)`, icon:"🛍️" },
+        { label:"Precio por figurita", valor:fmt(PRECIO_FIGU), icon:"🃏" },
+        { label:"Total del álbum", valor:`${TOTAL_FIGUS} figuritas`, icon:"📚" },
+        { label:"Costo comprando todo", valor:fmt(costoComprando), icon:"💸" },
+        { label:"Sobres necesarios (con repetidas)", valor:`~${sobresNecesarios} sobres`, icon:"📦" },
+        { label:"Costo real sin intercambiar", valor:fmt(costoReal), icon:"😱" },
+        { label:"Ahorro intercambiando", valor:fmt(ahorroPersona), icon:"💰", highlight:true },
+      ].map((item, i) => (
+        <div key={i} style={{
+          background: item.highlight ? `${C.green}18` : "white",
+          border:`2px solid ${item.highlight ? C.green : C.blueLight}`,
+          borderRadius:12, padding:"11px 14px", marginBottom:8,
+          display:"flex", alignItems:"center", justifyContent:"space-between",
+          boxShadow:item.highlight ? `3px 3px 0 ${C.green}` : `2px 2px 0 ${C.blueLight}`,
+        }}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{fontSize:20}}>{item.icon}</span>
+            <span style={{fontSize:13,fontWeight:700,color:C.blueDeep}}>{item.label}</span>
+          </div>
+          <span style={{fontFamily:"'Paytone One',cursive",fontSize:14,
+            color:item.highlight?C.greenDeep:C.blueDark}}>{item.valor}</span>
+        </div>
+      ))}
+
+      {/* AHORRO FAMILIAR */}
+      <div style={{background:`linear-gradient(135deg,${C.blue} 0%,${C.blueDark} 100%)`,
+        border:`2px solid ${C.blueDark}`,borderRadius:18,padding:18,marginBottom:14,
+        boxShadow:`4px 4px 0 ${C.blueDark}`,marginTop:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:36}}>👨‍👩‍👧‍👦</span>
+          <div>
+            <div style={{fontFamily:"'Paytone One',cursive",fontSize:15,color:"white",marginBottom:4}}>
+              Familia con 2 hijos coleccionando
+            </div>
+            <div style={{fontFamily:"'Paytone One',cursive",fontSize:28,color:C.gold}}>
+              {fmt(ahorroFamilia)}
+            </div>
+            <div style={{fontSize:11,color:"rgba(255,255,255,.75)",fontWeight:700,marginTop:2}}>
+              de ahorro usando FiguBarrio
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* TUS STATS PERSONALES */}
+      {totalMarcadas > 0 && (
+        <>
+          <div className="sectitle">Tu ahorro personal hasta hoy</div>
+          <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
+            padding:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+              <div style={{textAlign:"center",padding:10,background:C.bluePale,borderRadius:10,
+                border:`2px solid ${C.blueLight}`}}>
+                <div style={{fontFamily:"'Paytone One',cursive",fontSize:22,color:C.blue}}>{tengo}</div>
+                <div style={{fontSize:10,color:C.muted,fontWeight:800,textTransform:"uppercase"}}>Tengo</div>
+              </div>
+              <div style={{textAlign:"center",padding:10,background:`${C.green}15`,borderRadius:10,
+                border:`2px solid ${C.green}`}}>
+                <div style={{fontFamily:"'Paytone One',cursive",fontSize:22,color:C.green}}>{reps}</div>
+                <div style={{fontSize:10,color:C.muted,fontWeight:800,textTransform:"uppercase"}}>Para dar</div>
+              </div>
+            </div>
+            <div style={{background:`${C.green}18`,border:`2px solid ${C.green}`,borderRadius:12,
+              padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{fontSize:13,fontWeight:700,color:C.blueDeep}}>
+                💰 Ahorro por tus {reps} repetidas
+              </div>
+              <div style={{fontFamily:"'Paytone One',cursive",fontSize:16,color:C.greenDeep}}>
+                {fmt(ahorroPropio)}
+              </div>
+            </div>
+            {reps === 0 && (
+              <div style={{fontSize:12,color:C.muted,fontWeight:700,textAlign:"center",marginTop:8}}>
+                Cargá tus figuritas repetidas para ver tu ahorro personal.
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* COMPARTIR */}
+      <button
+        onClick={()=>{
+          const texto = `🃏 FiguBarrio me ayuda a ahorrar ${fmt(ahorroPersona)} en el álbum del Mundial 2026. ¡Descargala y cambiá figuritas con vecinos del barrio! 🇦🇷`;
+          if(navigator.share) {
+            navigator.share({ title:"FiguBarrio", text:texto });
+          } else {
+            navigator.clipboard.writeText(texto);
+            alert("¡Texto copiado! Pegalo donde quieras.");
+          }
+        }}
+        style={{width:"100%",background:C.gold,color:C.blueDeep,
+          border:`2px solid ${C.goldDeep}`,borderRadius:14,padding:"13px",
+          fontFamily:"'Paytone One',cursive",fontSize:15,cursor:"pointer",
+          boxShadow:`3px 3px 0 ${C.goldDeep}`,marginTop:14}}>
+        📣 Compartir este ahorro
+      </button>
+
+      <div style={{height:20}}/>
+    </div>
+  );
+}
+
+// ─── ROOT ─────────────────────────────────────────────────────────────────────
+export default function App() {
+  const [user, setUser]             = useState(null);
+  const [tab, setTab]               = useState("home");
+  const [chatMatch, setChatMatch]   = useState(null);
+  const [ticketData, setTicketData] = useState(null);
+  const [figus, setFigus]           = useState({});
+  const [matchCount, setMatchCount] = useState(0);
+  const [adsEnabled, setAdsEnabled] = useState(true);
+  // Al cargar, sincronizar datos de Firebase
+  useEffect(() => {
+    Promise.all([DB.syncUsuarios(), DB.syncFiguritas()]).then(() => {
+      // Verificar si hay sesión guardada en localStorage
+      const savedUserId = localStorage.getItem("fb_current_user");
+      if(savedUserId) {
+        const perfil = DB.getUser(savedUserId);
+        if(perfil) {
+          const prevFigus = DB.getFigus(perfil.userId, perfil.albumId);
+          setFigus(prevFigus);
+          setUser(perfil);
+        }
+      }
+    });
+  }, []);
+  const [sobreActivo, setSobreActivo] = useState(null);
+  const [pendienteConfirm, setPendienteConfirm] = useState(null);
+
+  // Al registrarse: guardar en Firebase y sincronizar usuarios
+  const handleRegister = async form => {
+    // Usar Google UID si está disponible, sino generar uno
+    const gUser = window.fbAuth ? window.fbAuth.currentUser : null;
+    const userId = gUser ? "google_" + gUser.uid : "user_" + Date.now() + "_" + Math.random().toString(36).substr(2,5);
+    const userData = { ...form, userId, albumId: form.album };
+    // Sincronizar usuarios existentes desde Firebase primero
+    await DB.syncUsuarios();
+    await DB.syncFiguritas();
+    // Guardar el nuevo usuario
+    await DB.saveUser(userId, userData);
+    const prevFigus = DB.getFigus(userId, form.album);
+    setFigus(prevFigus);
+    // Guardar sesión en localStorage para recordar al usuario
+    localStorage.setItem("fb_current_user", userId);
+    setUser(userData);
+    // Chequear sobres pendientes de confirmación
+    const sobres = DBSobres.getMios(userId);
+    const pendientes = sobres.filter(s => s.estado === "pendiente" &&
+      (s.userA === userId ? !s.confirmadoA : !s.confirmadoB));
+    if(pendientes.length > 0) setPendienteConfirm(pendientes[0]);
+  };
+
+  // Ver sobre desde match
+  const handleVerSobre = (match) => {
+    if(!user) return;
+    // Buscar si ya existe sobre entre estos dos usuarios esta semana
+    const semana = getSemanaKey();
+    const sobres = DBSobres.getMios(user.userId);
+    const existente = sobres.find(s =>
+      s.semana === semana &&
+      ((s.userA === user.userId && s.userB === match.userId) ||
+       (s.userB === user.userId && s.userA === match.userId))
+    );
+    if(existente) {
+      setSobreActivo(existente);
+      setTab("sobre");
+      return;
+    }
+    // Crear nuevo sobre
+    const codigo = generarCodigoSobre();
+    const soyA = true;
+    const nuevoSobre = {
+      codigo,
+      semana,
+      estado: "pendiente",
+      userA: user.userId,
+      apodoA: user.apodo,
+      celA: user.telefono,
+      userB: match.userId,
+      apodoB: match.apodo,
+      celB: match.edad ? "" : "", // en prod vendría del DB
+      figusDe: match.yoLeDoy,     // lo que yo le doy
+      figusParA: match.elMeDa,    // lo que él me da
+      punto: null,
+      confirmadoA: false,
+      confirmadoB: false,
+      advertenciaVista: false,
+      createdAt: Date.now(),
+    };
+    DBSobres.save(codigo, nuevoSobre);
+    setSobreActivo(nuevoSobre);
+    setTab("sobre");
+  };
+
+  const handleConfirmarSobre = (codigo) => {
+    const resultado = DBSobres.confirmar(codigo, user.userId);
+    if(resultado) setSobreActivo(resultado);
+    setPendienteConfirm(null);
+    setTab("matches");
+  };
+
+  const handleAnularSobre = (codigo, motivo) => {
+    DBSobres.anular(codigo, motivo);
+    DBRep.penalizar(user.userId, 1);
+    setSobreActivo(null);
+    setPendienteConfirm(null);
+    setTab("matches");
+  };
+
+  // Sincronizar figuritas → base de datos y recalcular match count
+  const handleSetFigus = async newFigus => {
+    setFigus(newFigus);
+    if (user) {
+      // Guardar en Firebase + localStorage
+      await DB.saveFigus(user.userId, user.albumId, newFigus);
+      setTimeout(() => {
+        const todos   = DB.getAllUsers();
+        const fresh   = DB.getFigus(user.userId, user.albumId);
+        const matches = calcularMatches(user.userId, user.albumId, fresh, todos);
+        setMatchCount(matches.length);
+      }, 500);
+    }
+  };
+
+  // Actualizar match count cuando cambia el usuario
+  useEffect(() => {
+    if (user) {
+      const todos   = DB.getAllUsers();
+      const matches = calcularMatches(user.userId, user.albumId, figus, todos);
+      setMatchCount(matches.length);
+    }
+  }, [user]);
+
+
+
+  const goTo = t => { setTab(t); setChatMatch(null); setTicketData(null); };
+
+  const render = () => {
+    if (tab==="ticket" && ticketData)
+      return <TicketScreen match={ticketData.match} punto={ticketData.punto} user={user} onBack={()=>setTab("chat")}/>;
+    if (tab==="chat" && chatMatch)
+      return <ChatScreen match={chatMatch} user={user} onBack={()=>setTab("matches")}
+        onVerTicket={(m,p)=>{setTicketData({match:m,punto:p});setTab("ticket");}}
+        onFigurasEntregadas={async (figusDadas) => {
+          // Las figuritas entregadas pasan de "repetida" → "tengo"
+          // Usamos handleSetFigus que ya sabe guardar en Firebase + localStorage
+          setFigus(prev => {
+            const updated = {...prev};
+            figusDadas.forEach(cod => { updated[cod] = "tengo"; });
+            // Guardar de forma asíncrona usando el estado actualizado
+            DB.saveFigus(user.userId, user.albumId, updated);
+            return updated;
+          });
+        }}/>;
+    switch(tab) {
+      case "home":    return <HomeScreen user={user} figus={figus} setTab={setTab} matchCount={matchCount}/>;
+      case "album":   return <AlbumScreen user={user} figus={figus} setFigus={handleSetFigus}/>;
+      case "matches": return <MatchesScreen user={user} figus={figus} onOpenChat={m=>{setChatMatch(m);setTab("chat");}} onVerSobre={handleVerSobre}/>;
+      case "puntos":  return <PuntosScreen/>;
+      case "ahorro":  return <AhorroScreen figus={figus}/>;
+      case "perfil":  return <PerfilScreen user={user} figus={figus} adsEnabled={adsEnabled} setAdsEnabled={setAdsEnabled}/>;
+      default:        return <HomeScreen user={user} figus={figus} setTab={setTab} matchCount={matchCount}/>;
+    }
+  };
+
+  // Sincronizar con Firebase y recalcular cuando se va a Matches
+  useEffect(() => {
+    if (tab === "matches" && user) {
+      // Sincronizar datos frescos de Firebase
+      Promise.all([DB.syncUsuarios(), DB.syncFiguritas()]).then(() => {
+        const todos  = DB.getAllUsers();
+        const fresh  = DB.getFigus(user.userId, user.albumId);
+        const result = calcularMatches(user.userId, user.albumId, fresh, todos);
+        setMatchCount(result.length);
+      });
+    }
+  }, [tab]);
+
+  const navTab = ["chat","ticket"].includes(tab) ? "matches" : tab;
+
+  return (
+    <>
+      <style>{css}</style>
+      <div className="shell" style={{position:"relative"}}>
+        {!user
+          ? <OnboardingScreen onDone={handleRegister}/>
+          : <>
+              {/* BOTÓN INICIO — arriba izquierda dentro del shell */}
+              {!["home","chat","sobre","album"].includes(tab) && (
+                <button onClick={()=>goTo("home")} style={{
+                  position:"absolute",top:12,left:12,zIndex:200,
+                  background:"white",border:`2px solid ${C.blueDark}`,
+                  borderRadius:12,width:38,height:38,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  fontSize:20,cursor:"pointer",
+                  boxShadow:`2px 2px 0 ${C.blue}`}}>
+                  🏠
+                </button>
+              )}
+              {render()}
+              <BottomNav active={navTab} setActive={goTo} matchCount={matchCount}/>
+              {/* POPUP DE CONFIRMACIÓN PENDIENTE */}
+              {pendienteConfirm && tab !== "sobre" && (
+                <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",
+                  display:"flex",alignItems:"center",justifyContent:"center",zIndex:999,padding:20}}>
+                  <div style={{background:"white",borderRadius:20,padding:24,width:"100%",
+                    maxWidth:360,border:`3px solid ${C.blue}`,boxShadow:`5px 5px 0 ${C.blue}`}}>
+                    <div style={{fontFamily:"'Paytone One',cursive",fontSize:18,color:C.blueDark,marginBottom:8}}>
+                      📬 Sobre pendiente
+                    </div>
+                    <div style={{fontSize:13,fontWeight:700,color:C.muted,lineHeight:1.6,marginBottom:16}}>
+                      Tenés un intercambio pendiente de confirmar.<br/>
+                      Código: <strong style={{color:C.blueDark}}>{pendienteConfirm.codigo}</strong>
+                    </div>
+                    <button className="btn" style={{marginBottom:8}}
+                      onClick={()=>{setSobreActivo(pendienteConfirm);setTab("sobre");setPendienteConfirm(null);}}>
+                      📦 Ver el sobre
+                    </button>
+                    <button className="btn2" onClick={()=>setPendienteConfirm(null)}>
+                      Más tarde
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+        }
+      </div>
+    </>
+  );
+}
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
