@@ -919,11 +919,11 @@ function OnboardingScreen({ onDone }) {
         </div>
         <div className="logo-main">FiguBarrio</div>
         <div style={{display:"flex",gap:5,margin:"6px 0"}}><S.Estrella size={20}/><S.Estrella size={20}/><S.Estrella size={20}/></div>
-        <div className="logo-sub">Intercambio entre vecinos · CABA</div>
+        <div className="logo-sub">Intercambio entre amigos · Mundial 2026</div>
       </div>
       <div className="ocard">
         <div className="otitle">¡Bienvenido, che! 👋</div>
-        <div className="odesc">Creá tu perfil para intercambiar con vecinos del barrio.</div>
+        <div className="odesc">Creá tu perfil para intercambiar con amigos.</div>
 
         <div className="lbl">Elegí tu avatar</div>
         <div style={{display:"flex",flexWrap:"wrap",gap:8,marginBottom:12}}>
@@ -940,7 +940,10 @@ function OnboardingScreen({ onDone }) {
         <div className="lbl">Tu apodo</div>
         <input className="inp" placeholder="Ej: FiguMaster99" value={form.apodo} onChange={e=>set("apodo",e.target.value)}/>
         <div className="lbl">¿Cuántos años tenés?</div>
-        <input className="inp" type="number" placeholder="Tu edad" value={form.edad} onChange={e=>set("edad",e.target.value)} min={5} max={99}/>
+        <select className="inp" value={form.edad} onChange={e=>set("edad",e.target.value)} style={{appearance:"auto"}}>
+          <option value="">Tu edad</option>
+          {Array.from({length:95},(_,i)=>i+5).map(n=><option key={n} value={n}>{n} años</option>)}
+        </select>
         {menor13&&<div className="warn-box"><span>⚠️</span><span>Para menores de 13 necesitamos e-mail de un adulto responsable.</span></div>}
         <div className="lbl">Tu barrio en CABA</div>
         <select className="inp" value={form.barrio} onChange={e=>set("barrio",e.target.value)}>
@@ -948,10 +951,8 @@ function OnboardingScreen({ onDone }) {
           {BARRIOS.map(b=><option key={b}>{b}</option>)}
         </select>
         <div className="lbl">Tu teléfono de contacto</div>
-        <input className="inp" type="tel" placeholder="11-XXXX-XXXX" value={form.telefono} onChange={e=>set("telefono",e.target.value)}/>
-        <div style={{fontSize:11,color:C.muted,fontWeight:700,marginTop:-8,marginBottom:11,lineHeight:1.4}}>
-          📦 Solo lo ve el encargado del punto de retiro.
-        </div>
+        <input className="inp" type="tel" placeholder="1133945931" value={form.telefono} onChange={e=>set("telefono",e.target.value.replace(/\D/g,""))} maxLength={10} inputMode="numeric"/>
+        
         {menor13&&(<><div className="lbl">E-mail del adulto responsable</div>
           <input className="inp" type="email" placeholder="mama@email.com" value={form.emailPadre} onChange={e=>set("emailPadre",e.target.value)}/></>)}
         <button className="btn" disabled={!form.apodo||!form.edad||!form.barrio||!form.telefono||(menor13&&!form.emailPadre)}
@@ -966,7 +967,7 @@ function OnboardingScreen({ onDone }) {
       <div className="logo-box" style={{marginBottom:18}}>
         <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
           <S.Empanada size={42}/>
-          <div className="logo-main" style={{fontSize:24}}>¿Qué álbum?</div>
+          <div className="logo-main" style={{fontSize:24}}>¡Comencemos!</div>
           <S.Mate size={40}/>
         </div>
         <div style={{display:"flex",gap:5}}><S.Estrella size={18}/><S.Estrella size={18}/><S.Estrella size={18}/></div>
@@ -988,7 +989,7 @@ function OnboardingScreen({ onDone }) {
         ))}
         {menor18&&<div className="ok-box" style={{marginTop:6}}><span>🛡️</span><span>Como sos menor, solo usás <strong>Por Sobre</strong>.</span></div>}
         <button className="btn" style={{marginTop:12}} disabled={!form.album} onClick={()=>onDone({...form,edad})}>
-          ¡Empezar a intercambiar! 🎉
+          Cargar y editar figuritas 📋
         </button>
         <button className="btn2" onClick={()=>setStep(1)}>← Volver</button>
       </div>
@@ -1053,26 +1054,7 @@ function HomeScreen({user, figus, setTab, matchCount}) {
 
 
 
-      {/* Banner días hasta lunes */}
-      {(() => {
-        const dias = diasHastaLunes();
-        if(dias === 0) return (
-          <div style={{background:C.green,border:`2px solid ${C.greenDeep}`,borderRadius:14,
-            padding:12,marginBottom:14,fontSize:13,fontWeight:700,color:"white",
-            display:"flex",gap:8,alignItems:"center",boxShadow:`3px 3px 0 ${C.greenDeep}`}}>
-            <span style={{fontSize:22}}>🎉</span>
-            <span><strong>¡Hoy es lunes!</strong> Se procesaron los matches de la semana. Revisá tus intercambios.</span>
-          </div>
-        );
-        return (
-          <div style={{background:`${C.gold}22`,border:`2px solid ${C.gold}`,borderRadius:14,
-            padding:12,marginBottom:14,fontSize:12,fontWeight:700,color:C.blueDeep,
-            display:"flex",gap:8,alignItems:"center"}}>
-            <span style={{fontSize:20}}>📅</span>
-            <span>Los matches se procesan el <strong>lunes</strong>. Faltan <strong>{dias} día{dias!==1?"s":""}</strong>.</span>
-          </div>
-        );
-      })()}
+
       <div className="sectitle">Mi álbum activo</div>
       <div className="acard sel" style={{background:`linear-gradient(135deg,${alb.colorA} 0%,${alb.colorB} 100%)`}}
         onClick={()=>setTab("album")}>
@@ -2954,23 +2936,7 @@ function PerfilScreen({ user, figus, adsEnabled, setAdsEnabled }) {
         </div>
       </div>
 
-      {/* MODALIDADES */}
-      <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
-        padding:14,marginBottom:14,boxShadow:`3px 3px 0 ${C.blueLight}`}}>
-        <div className="sectitle" style={{marginBottom:10}}>Modalidades disponibles</div>
-        <div style={{display:"flex",gap:8}}>
-          <div style={{background:C.green,color:"white",fontSize:12,fontWeight:900,
-            padding:"6px 12px",borderRadius:8,border:`2px solid ${C.greenDeep}`,
-            boxShadow:`2px 2px 0 ${C.greenDeep}`}}>📦 Por Sobre ✅</div>
-          <div style={{background:esAdulto?C.gold:"#eee",
-            color:esAdulto?C.blueDeep:C.muted,fontSize:12,fontWeight:900,
-            padding:"6px 12px",borderRadius:8,
-            border:`2px solid ${esAdulto?C.goldDeep:C.blueLight}`,
-            boxShadow:esAdulto?`2px 2px 0 ${C.goldDeep}`:"none"}}>
-            🤝 Directo {esAdulto?"✅":"🔒"}
-          </div>
-        </div>
-      </div>
+
 
       {/* ÁLBUM */}
       {alb && (
@@ -2994,65 +2960,9 @@ function PerfilScreen({ user, figus, adsEnabled, setAdsEnabled }) {
         </div>
       )}
 
-      {/* AHORRO — estadísticas dentro del perfil */}
-      {(() => {
-        const PRECIO_SOBRE = 2350;
-        const FIGUS_POR_SOBRE = 7;
-        const TOTAL_FIGUS = 980;
-        const PRECIO_FIGU = Math.round(PRECIO_SOBRE / FIGUS_POR_SOBRE);
-        const repsCount = Object.values(figus).filter(v=>v==="repetida").length;
-        const ahorroPropio = repsCount * PRECIO_FIGU;
-        const ahorroPersona = 134000;
-        const fmt = n => n.toLocaleString("es-AR",{style:"currency",currency:"ARS",maximumFractionDigits:0});
-        return (
-          <div style={{background:`linear-gradient(135deg,${C.green} 0%,${C.greenDeep} 100%)`,
-            border:`2px solid ${C.greenDeep}`,borderRadius:16,padding:16,marginBottom:14,
-            boxShadow:`4px 4px 0 ${C.greenDeep}`}}>
-            <div style={{fontFamily:"'Paytone One',cursive",fontSize:13,color:"rgba(255,255,255,.8)",
-              marginBottom:4}}>💰 Tu ahorro estimado intercambiando</div>
-            <div style={{fontFamily:"'Paytone One',cursive",fontSize:30,color:"white",
-              textShadow:`1px 1px 0 ${C.greenDeep}`}}>{fmt(ahorroPersona)}</div>
-            {repsCount > 0 && (
-              <div style={{fontSize:12,fontWeight:700,color:"rgba(255,255,255,.8)",marginTop:6}}>
-                🃏 Tus {repsCount} repetidas valen {fmt(ahorroPropio)} de ahorro
-              </div>
-            )}
-            <button onClick={()=>{
-              const texto = `🃏 FiguBarrio me ayuda a ahorrar ${fmt(ahorroPersona)} en el álbum del Mundial 2026. ¡Intercambiá figuritas con vecinos del barrio! 🇦🇷`;
-              if(navigator.share){navigator.share({title:"FiguBarrio",text:texto});}
-              else{navigator.clipboard.writeText(texto);alert("¡Texto copiado!");}
-            }} style={{marginTop:10,background:"rgba(255,255,255,.2)",color:"white",
-              border:"2px solid rgba(255,255,255,.5)",borderRadius:10,padding:"7px 14px",
-              fontFamily:"'Paytone One',cursive",fontSize:12,cursor:"pointer"}}>
-              📣 Compartir este ahorro
-            </button>
-          </div>
-        );
-      })()}
 
-      {/* CONFIGURACIÓN ADS */}
-      <div className="sectitle" style={{marginTop:8}}>Configuración</div>
-      <div style={{background:"white",border:`2px solid ${C.blueLight}`,borderRadius:14,
-        padding:14,display:"flex",alignItems:"center",gap:12,marginBottom:14,
-        boxShadow:`3px 3px 0 ${C.blueLight}`}}>
-        <div style={{flex:1}}>
-          <div style={{fontFamily:"'Paytone One',cursive",fontSize:14,color:C.blueDark}}>
-            Mostrar publicidad
-          </div>
-          <div style={{fontSize:11,color:C.muted,fontWeight:700,marginTop:2,lineHeight:1.4}}>
-            {adsEnabled?"Nos ayuda a mantener la app gratuita.":"Publicidad desactivada."}
-          </div>
-        </div>
-        <button onClick={()=>setAdsEnabled(!adsEnabled)}
-          style={{width:44,height:24,borderRadius:12,border:`2px solid ${C.blueDark}`,
-            cursor:"pointer",position:"relative",
-            background:adsEnabled?C.blue:C.blueLight,flexShrink:0,transition:"background .2s"}}>
-          <div style={{position:"absolute",top:2,
-            left:adsEnabled?"22px":"3px",width:17,height:17,
-            borderRadius:"50%",background:"white",
-            border:`1.5px solid ${C.blueDark}`,transition:"left .2s"}}/>
-        </button>
-      </div>
+
+
     </div>
   );
 }
