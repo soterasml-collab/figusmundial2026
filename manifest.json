@@ -1,0 +1,18 @@
+{
+  "name": "Figus Mundial 2026",
+  "short_name": "Figus 2026",
+  "description": "Intercambio de figuritas entre amigos",
+  "start_url": "/figusmundial2026/",
+  "display": "standalone",
+  "background_color": "#1a73e8",
+  "theme_color": "#1a73e8",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/figusmundial2026/icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
